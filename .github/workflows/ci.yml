@@ -76,6 +76,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Job-level rather than step-level so the engine step's `if` can test it —
+    # the secrets context is not readable from a step condition directly.
+    env:
+      ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -92,9 +96,18 @@ jobs:
 
       # Suites are named explicitly rather than running a bare `lest`: the
       # engine suite is `default = false` and so would auto-enable under $CI,
-      # firing an Open Cloud run per platform. It stays a manual `lest run
-      # engine`. This runs the framework against itself across all three OSes,
-      # which is where path-normalization differences (Windows/macOS fold case,
-      # Linux does not) would surface.
+      # firing an Open Cloud run per platform. It runs as its own step below,
+      # on one platform. This runs the framework against itself across all
+      # three OSes, which is where path-normalization differences
+      # (Windows/macOS fold case, Linux does not) would surface.
       - name: lest
         run: cargo run --locked -- run core coverage lune-runtime lute-runtime
+
+      # The engine suite executes server-side in Roblox's cloud, so one
+      # platform's run proves it for all three — three runs would be three
+      # identical round trips contending for the same test place. Skipped when
+      # the key is absent (fork PRs don't receive repository secrets) rather
+      # than failing over a secret the contributor cannot have.
+      - name: lest engine
+        if: matrix.os == 'ubuntu-latest' && env.ROBLOX_API_KEY != ''
+        run: cargo run --locked -- run engine
