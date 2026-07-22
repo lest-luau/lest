@@ -32,8 +32,8 @@ default = false
 # Non-secret Open Cloud target for cloud suites. These identifiers appear in the
 # Creator Dashboard URL for the experience and place.
 [cloud]
-universe_id = 10469641725
-place_id = 102831964562199
+universe_id = 10545683154
+place_id = 82459210338991
 
 [settings]
 timeout_ms = 5000
