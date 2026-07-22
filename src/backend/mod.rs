@@ -112,20 +112,34 @@ pub fn relative_path(from: &Path, to: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    // A `C:\...` literal is a single relative component on Unix, so fixtures
+    // must build an absolute path in the host's own syntax or every
+    // assertion dies at the `common == 0` guard instead of testing anything.
+    fn abs(tail: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:\\{}", tail.replace('/', "\\")))
+        } else {
+            PathBuf::from(format!("/{tail}"))
+        }
+    }
+
     #[test]
     fn relative_path_walks_up_and_down() {
-        let from = PathBuf::from("C:\\proj\\.lest");
-        let to = PathBuf::from("C:\\proj\\luau\\core\\mod");
+        let from = abs("proj/.lest");
+        let to = abs("proj/luau/core/mod");
         assert_eq!(relative_path(&from, &to).unwrap(), "../luau/core/mod");
     }
 
     #[test]
     fn relative_path_prefixes_descents_with_dot() {
-        let from = PathBuf::from("C:\\proj");
-        let to = PathBuf::from("C:\\proj\\src\\mod");
+        let from = abs("proj");
+        let to = abs("proj/src/mod");
         assert_eq!(relative_path(&from, &to).unwrap(), "./src/mod");
     }
 
+    // Drive prefixes exist only on Windows; on Unix these literals are two
+    // relative components and the assertion would pass vacuously.
+    #[cfg(windows)]
     #[test]
     fn relative_path_rejects_different_drives() {
         let from = PathBuf::from("C:\\proj\\.lest");
@@ -135,15 +149,15 @@ mod tests {
 
     #[test]
     fn require_string_addresses_init_modules_by_directory() {
-        let from = PathBuf::from("C:\\proj\\.lest");
-        let to = PathBuf::from("C:\\proj\\luau\\core\\init.luau");
+        let from = abs("proj/.lest");
+        let to = abs("proj/luau/core/init.luau");
         assert_eq!(require_string(&from, &to).unwrap(), "../luau/core");
     }
 
     #[test]
     fn require_string_keeps_compound_extensions() {
-        let from = PathBuf::from("C:\\proj\\.lest");
-        let to = PathBuf::from("C:\\proj\\src\\math.spec.luau");
+        let from = abs("proj/.lest");
+        let to = abs("proj/src/math.spec.luau");
         assert_eq!(require_string(&from, &to).unwrap(), "../src/math.spec");
     }
 }
