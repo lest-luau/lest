@@ -1,11 +1,11 @@
 name: ci
 
-# Every commit and every pull request. The concurrency group cancels a run when
-# a newer commit lands on the same ref, so pushing twice in quick succession
-# doesn't queue two full matrices.
+# Every push, on any branch. Not pull_request: same-repo PRs would run the
+# whole matrix (and an Open Cloud round trip) twice per commit. The concurrency
+# group cancels a run when a newer commit lands on the same ref, so pushing
+# twice in quick succession doesn't queue two full matrices.
 on:
   push:
-  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
