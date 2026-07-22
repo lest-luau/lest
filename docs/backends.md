@@ -139,6 +139,32 @@ Nothing needs to be installed in the project for engine tests: the in-engine
 collector and task scheduler are compiled into the CLI and inlined into the
 bundle.
 
+### Requiring place modules
+
+The bundle is self-contained, so an empty place works — but the place doesn't
+have to be empty. If yours is populated (a rojo-built place with fixtures as
+real ModuleScripts, say), a require whose argument is a ModuleScript Instance
+is handed to the engine's own `require`:
+
+```luau
+local fixture = game:GetService('ServerStorage').Fixtures.recorder
+local Recorder = require(fixture)
+```
+
+Delegated requires go through the engine's native module cache, so a spec and
+in-place code requiring the same ModuleScript get the same table — shared state
+and module identity survive, which no bundled copy of the module could
+guarantee.
+
+Two rules keep the boundary sharp:
+
+- **String requires belong to the bundler.** They must resolve on disk at
+  bundle time, and an unresolved one is a loud error, never a silent fallback.
+  That includes *dynamic* string requires — a variable holding a path can't be
+  resolved from the CLI and isn't supported on this backend.
+- **Everything else belongs to the engine.** Instances (and legacy asset ids)
+  pass through untouched, and the engine's own errors surface unchanged.
+
 Snapshots work on cloud exactly as they do everywhere else — comparison,
 writing, and `-u` updates all happen CLI-side, so the backend makes no
 difference. See [Snapshots](snapshots.md#across-backends).

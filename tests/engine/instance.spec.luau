@@ -37,6 +37,23 @@ describe('Instance', function ()
 	end)
 end)
 
+describe('require delegation', function ()
+	-- The bundle's require shim owns string requires; anything else must reach
+	-- the engine's own require. lest's test place is empty, so there is no
+	-- ModuleScript to require for a positive proof — instead, require a Folder
+	-- and check the *engine* rejects it in its own words. The bundler's
+	-- 'unresolved require' error here would mean delegation never happened.
+	it('hands Instance arguments to the engine require, not the bundler', function ()
+		local dynamicRequire = require :: any
+		local folder = Instance.new('Folder')
+		local ok, err = pcall(function ()
+			return dynamicRequire(folder)
+		end)
+		expect(ok).toBe(false)
+		expect(string.find(tostring(err), 'lest cloud bundle', 1, true)).toBeNil()
+	end)
+end)
+
 describe('DataModel', function ()
 	it('resolves core services through game:GetService', function ()
 		local workspaceService = game:GetService('Workspace')
