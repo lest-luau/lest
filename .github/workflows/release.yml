@@ -1,0 +1,105 @@
+name: release
+
+# Publish a GitHub Release (draft it in the UI, then hit publish) and this
+# builds a binary for every supported platform and attaches them, plus a
+# SHA256SUMS file. Assets are named so `rokit add lest-luau/lest` finds the
+# right one per platform automatically.
+on:
+  release:
+    types: [published]
+
+# gh release upload writes assets back to the release.
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      # One platform's toolchain failing shouldn't hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # Each target is built on a runner whose native architecture matches
+          # it, so the vendored C++ Luau (mlua's `luau` feature) compiles with
+          # the host compiler — no cross-compilation toolchain to maintain.
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The archive holds the bare binary at its root, which is what rokit
+      # expects to extract. Version drops any leading `v` from the tag, so
+      # tag `v0.1.0` yields `lest-0.1.0-<platform>.zip`.
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          archive="lest-${version}-${{ matrix.name }}.zip"
+          ( cd "target/${{ matrix.target }}/release" && zip "$GITHUB_WORKSPACE/$archive" lest )
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:TAG -replace '^v', ''
+          $archive = "lest-$version-${{ matrix.name }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/lest.exe" -DestinationPath $archive
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lest-${{ matrix.name }}
+          path: lest-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # merge-multiple flattens every build job's single archive into one dir.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.zip > SHA256SUMS
+
+      # --clobber makes a re-run idempotent: it overwrites assets already on the
+      # release rather than failing.
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.zip dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

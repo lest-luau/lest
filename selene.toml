@@ -1,0 +1,7 @@
+std = "luau"
+
+# The engine specs use real Roblox globals (Instance, game, workspace) that only
+# exist in the cloud backend's runtime, not in the `luau` std. They run in a real
+# place, so there is nothing to lint them against here — excluded rather than
+# checked against a Roblox std this project otherwise has no use for.
+exclude = ["tests/engine/**"]

@@ -1,0 +1,42 @@
+# lest's own tests, run by lest itself (dogfood).
+backend = "native"
+
+# The framework's pure-logic specs run on the embedded VM.
+[suites.core]
+include = ["tests/core/**/*.spec.luau"]
+
+# A native suite with real source under test, so `lest --coverage` has something
+# to instrument (the framework's own source is excluded from coverage reports).
+[suites.coverage]
+include = ["tests/coverage/**/*.spec.luau"]
+
+# Specs that need real runtime APIs run inside spawned runtime processes —
+# one harness seam, two runtimes.
+[suites.lune-runtime]
+include = ["tests/lune/**/*.spec.luau"]
+backend = "lune"
+
+[suites.lute-runtime]
+include = ["tests/lute/**/*.spec.luau"]
+backend = "lute"
+
+# Specs that touch real engine APIs (Instances, services, the DataModel) run in
+# an actual Roblox place through Open Cloud. Opt-in locally (default = false);
+# auto-enabled when $CI is set. The API key is read from the environment
+# (ROBLOX_API_KEY, or a project-root .env), never from this file.
+[suites.engine]
+include = ["tests/engine/**/*.spec.luau"]
+backend = "cloud"
+default = false
+
+# Non-secret Open Cloud target for cloud suites. These identifiers appear in the
+# Creator Dashboard URL for the experience and place.
+[cloud]
+universe_id = 10469641725
+place_id = 102831964562199
+
+[settings]
+timeout_ms = 5000
+# Where this repo keeps lest/core (dogfood layout; package layouts are
+# auto-detected in a later phase).
+core = "luau/core"
