@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::report::{check_protocol_version, Event};
+use crate::report::{check_protocol_version, Event, Failure};
 use serde_json::Value;
 
 use crate::backend::{display_rel, EventSink, SuitePlan};
@@ -107,8 +107,11 @@ fn run_with_transport<T: Transport>(
             name_filter: plan.name_filter.as_deref(),
             deadline_ms,
         };
-        let bundle::Bundle { script, unresolved } =
-            bundle::bundle_with_cache(&input, &mut sources)?;
+        let bundle::Bundle {
+            script,
+            unresolved,
+            source_map,
+        } = bundle::bundle_with_cache(&input, &mut sources)?;
         for miss in unresolved {
             if warned.insert(miss.clone()) {
                 crate::report::warn_to_stderr(&unresolved_warning(&miss, &plan.root));
@@ -125,7 +128,7 @@ fn run_with_transport<T: Transport>(
         for value in events {
             // Prefixless, context-in-sentence — one protocol error, one
             // spelling across backends (mirrors `backend::runtime`).
-            let event: Event = serde_json::from_value(value).map_err(|e| {
+            let mut event: Event = serde_json::from_value(value).map_err(|e| {
                 ToolError(format!(
                     "undecodable protocol event from the cloud task for spec {name}: {e}"
                 ))
@@ -139,6 +142,11 @@ fn run_with_transport<T: Transport>(
                         "framework/CLI protocol mismatch in {name}: {mismatch}"
                     ))
                 })?;
+            }
+            // Engine error positions arrive as bundle coordinates — this
+            // bundle's, so the rewrite uses the map built alongside it.
+            if let Event::TestFail { failure, .. } = &mut event {
+                remap_failure(failure, &source_map, &plan.root);
             }
             if matches!(
                 event,
@@ -185,6 +193,64 @@ fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
         miss.line,
         miss.reason
     )
+}
+
+/// Rewrites every bundle coordinate in a failure's text fields to the disk
+/// file and line it came from. Assertion messages come from matchers rather
+/// than the engine, but a caught engine error quoted into one still carries
+/// coordinates worth translating — and the rewrite is a no-op on text
+/// without any.
+fn remap_failure(failure: &mut Failure, map: &bundle::SourceMap, root: &Path) {
+    match failure {
+        Failure::Assertion { message, .. } => {
+            *message = remap_bundle_coordinates(message, map, root);
+        }
+        Failure::Error { message, trace } => {
+            *message = remap_bundle_coordinates(message, map, root);
+            if let Some(trace) = trace {
+                *trace = remap_bundle_coordinates(trace, map, root);
+            }
+        }
+    }
+}
+
+/// The chunk name Open Cloud's Luau execution gives the submitted script,
+/// and therefore the name every engine error position carries.
+const BUNDLE_CHUNK: &str = "TaskScript:";
+
+/// Replaces each `TaskScript:<line>` in `text` with the module file
+/// (root-relative) and line it maps to — `tests/engine/foo.spec.luau:12`
+/// instead of `TaskScript:1598`. A coordinate that falls in bundler
+/// scaffolding (the prelude, a require shim, the entrypoint) has no source
+/// line and is left as it arrived, as is one that is not a coordinate at all.
+fn remap_bundle_coordinates(text: &str, map: &bundle::SourceMap, root: &Path) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(found) = rest.find(BUNDLE_CHUNK) {
+        result.push_str(&rest[..found]);
+        let after = &rest[found + BUNDLE_CHUNK.len()..];
+        let digits = &after[..after.bytes().take_while(u8::is_ascii_digit).count()];
+        let mapped = digits
+            .parse::<usize>()
+            .ok()
+            .and_then(|line| map.resolve(line));
+        match mapped {
+            Some((span, line)) => {
+                let origin = match &span.file {
+                    Some(file) => display_rel(file, root),
+                    None => span.label.clone(),
+                };
+                result.push_str(&format!("{origin}:{line}"));
+            }
+            None => {
+                result.push_str(BUNDLE_CHUNK);
+                result.push_str(digits);
+            }
+        }
+        rest = &after[digits.len()..];
+    }
+    result.push_str(rest);
+    result
 }
 
 /// Reads the Open Cloud API key from the environment. A missing key for a cloud
@@ -337,6 +403,85 @@ mod tests {
         let plan = plan_for(&root, root.join("tests/core/expect.spec.luau"));
         let err = resolve_target(&plan, &CloudTarget::default()).unwrap_err();
         assert!(err.to_string().contains("universe_id"), "{err}");
+    }
+
+    /// The field report's headline complaint: engine failures pointed at
+    /// `TaskScript:1598`, meaningless without reverse-engineering the bundle.
+    /// A decoded failure must name the disk file and line instead — and leave
+    /// coordinates in bundler scaffolding untouched.
+    #[test]
+    fn engine_failure_coordinates_are_rewritten_to_disk_positions() {
+        let root = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("boom.spec.luau");
+        std::fs::write(
+            &spec,
+            "--!strict\nlocal function explode ()\n\terror('boom')\nend\nexplode()\nreturn nil\n",
+        )
+        .unwrap();
+        let plan = plan_for(&root, spec.clone());
+
+        // Bundle the same modules the runner will (the entrypoint tail cannot
+        // shift them) to learn which bundle line the spec's line 3 — the
+        // `error` call — landed on.
+        let specs = [bundle::SpecEntry {
+            name: display_rel(&spec, &root),
+            path: spec.clone(),
+        }];
+        let input = bundle::BundleInput {
+            core_entry: &plan.core_entry,
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1,
+        };
+        let built = bundle::bundle(&input).unwrap();
+        let spec_key = crate::resolve::normalize(&spec);
+        let coordinate = (1..=built.script.lines().count())
+            .find(|&line| {
+                matches!(
+                    built.source_map.resolve(line),
+                    Some((span, 3)) if span.file.as_deref() == Some(spec_key.as_path())
+                )
+            })
+            .expect("the spec's line 3 must be somewhere in the bundle");
+
+        let events_json = format!(
+            r#"[
+            {{"kind":"run_start","specCount":1,"protocolVersion":1}},
+            {{"kind":"test_fail","path":["boom"],"name":"explodes","durationMs":0.1,
+              "failure":{{"type":"error","message":"TaskScript:{coordinate}: boom",
+                          "trace":"TaskScript:{coordinate} function explode\nTaskScript:1 "}}}},
+            {{"kind":"run_end","passed":0,"failed":1,"skipped":0}}
+        ]"#
+        );
+        let transport = FakeCloud {
+            events_json,
+            seen: RefCell::new(0),
+        };
+
+        let mut failures: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let mut sink = |_: Option<&Path>, e: &Event| {
+                if let Event::TestFail {
+                    failure: Failure::Error { message, trace },
+                    ..
+                } = e
+                {
+                    failures.push((message.clone(), trace.clone()));
+                }
+            };
+            run_with_transport(&plan, &transport, "key", "1", "2", &mut sink).unwrap();
+        }
+        assert_eq!(failures.len(), 1);
+        let (message, trace) = &failures[0];
+        assert!(message.contains("boom.spec.luau:3: boom"), "{message}");
+        let trace = trace.as_deref().unwrap();
+        assert!(
+            trace.contains("boom.spec.luau:3 function explode"),
+            "{trace}"
+        );
+        // Line 1 is the prelude comment — scaffolding, left as it arrived.
+        assert!(trace.contains("TaskScript:1 "), "{trace}");
     }
 
     /// The warning carries what the eventual in-engine error cannot: the

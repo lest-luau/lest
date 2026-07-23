@@ -47,6 +47,52 @@ pub struct Bundle {
     /// position, because the alternative is the shim's runtime error at a
     /// bundle coordinate no reader can use.
     pub unresolved: Vec<UnresolvedRequire>,
+    /// Where each module's source lines sit in `script`, so an engine error
+    /// position — a bundle coordinate — can be translated back to the disk
+    /// file and line it came from.
+    pub source_map: SourceMap,
+}
+
+/// The bundle-line spans of every inlined module body, in emission order.
+#[derive(Debug, Default)]
+pub struct SourceMap {
+    spans: Vec<SourceSpan>,
+}
+
+/// One module body's position in the emitted bundle. Spans cover the verbatim
+/// source only; the factory scaffolding around it (the module comment, the
+/// `__map` line, the require shim) belongs to no source line.
+#[derive(Debug)]
+pub struct SourceSpan {
+    /// The module's file on disk; `None` for the CLI-embedded runtime
+    /// modules, which have no path a user could open.
+    pub file: Option<PathBuf>,
+    /// The label the bundle's module comment carries — what to print when
+    /// there is no file.
+    pub label: String,
+    /// 1-based bundle line where the module's source line 1 was emitted.
+    start_line: usize,
+    /// How many lines of source the module occupies.
+    line_count: usize,
+}
+
+impl SourceMap {
+    /// Translates a 1-based bundle line into the span containing it and the
+    /// module-local (1-based) line. Bundle lines in scaffolding — the
+    /// prelude, factory preambles, the entrypoint — belong to no module and
+    /// return `None`, so callers leave those coordinates as they arrived.
+    pub fn resolve(&self, bundle_line: usize) -> Option<(&SourceSpan, usize)> {
+        // Emission order means `start_line`s are strictly increasing, so the
+        // only candidate is the last span starting at or before the line.
+        let candidates = self.spans.partition_point(|s| s.start_line <= bundle_line);
+        let span = self.spans[..candidates].last()?;
+        let offset = bundle_line - span.start_line;
+        (offset < span.line_count).then_some((span, offset + 1))
+    }
+
+    fn push(&mut self, span: SourceSpan) {
+        self.spans.push(span);
+    }
 }
 
 /// A string require the bundler could not resolve, omitted from the emitted
@@ -203,13 +249,22 @@ pub fn bundle_with_cache(
     out.push_str(PRELUDE);
 
     let mut unresolved = Vec::new();
+    let mut source_map = SourceMap::default();
     for path in &modules {
-        emit_module(&mut out, path, &id_of, cache, &resolver, &mut unresolved)?;
+        emit_module(
+            &mut out,
+            path,
+            &id_of,
+            cache,
+            &resolver,
+            &mut unresolved,
+            &mut source_map,
+        )?;
     }
     // The CLI-embedded in-engine runtime, inlined from compiled-in source
     // under fixed `lr_*` ids.
     for module in EMBEDDED {
-        emit_embedded(&mut out, module);
+        emit_embedded(&mut out, module, &mut source_map);
     }
 
     // ── Entrypoint ──────────────────────────────────────────────────────────
@@ -285,6 +340,7 @@ return collector.events()
     Ok(Bundle {
         script: out,
         unresolved,
+        source_map,
     })
 }
 
@@ -347,6 +403,7 @@ fn emit_module(
     cache: &mut SourceCache,
     resolver: &Resolver,
     unresolved: &mut Vec<UnresolvedRequire>,
+    source_map: &mut SourceMap,
 ) -> Result<(), ToolError> {
     let id = id_of
         .get(&normalize(path))
@@ -381,13 +438,20 @@ fn emit_module(
             }),
         }
     }
-    write_module_factory(out, &path.display().to_string(), &id, source, &mappings);
+    let label = path.display().to_string();
+    let (start_line, line_count) = write_module_factory(out, &label, &id, source, &mappings);
+    source_map.push(SourceSpan {
+        file: Some(path.to_path_buf()),
+        label,
+        start_line,
+        line_count,
+    });
     Ok(())
 }
 
 /// Emits a factory for an embedded runtime module, resolving its sibling
 /// requires among the embedded set rather than against the filesystem.
-fn emit_embedded(out: &mut String, module: &EmbeddedModule) {
+fn emit_embedded(out: &mut String, module: &EmbeddedModule, source_map: &mut SourceMap) {
     let source = module
         .source
         .strip_prefix('\u{feff}')
@@ -402,19 +466,28 @@ fn emit_embedded(out: &mut String, module: &EmbeddedModule) {
         }
     }
     let label = format!("embedded lest/roblox: {}", module.name);
-    write_module_factory(out, &label, module.id, source, &mappings);
+    let (start_line, line_count) = write_module_factory(out, &label, module.id, source, &mappings);
+    source_map.push(SourceSpan {
+        file: None,
+        label,
+        start_line,
+        line_count,
+    });
 }
 
 /// Writes one `__lest_modules['id'] = function() <require map> <source> end`
 /// factory. The injected `require` shadows the global for the module body,
-/// mapping each require literal to an inlined module id.
+/// mapping each require literal to an inlined module id. Returns the
+/// (1-based bundle start line, line count) of the verbatim body — the span
+/// the source map needs, measured here because only this function knows where
+/// scaffolding ends and source begins.
 fn write_module_factory(
     out: &mut String,
     label: &str,
     id: &str,
     source: &str,
     mappings: &BTreeMap<String, String>,
-) {
+) -> (usize, usize) {
     // The label goes through the same escaping as every other interpolation in
     // this file. It is only a comment, but it is built from a filesystem path,
     // and a path containing a newline would end the comment early and splice
@@ -457,12 +530,21 @@ fn write_module_factory(
         label = luau_escape(label)
     ));
     // The module body is inlined verbatim; its top-level `return` becomes the
-    // factory's return value.
+    // factory's return value. Recounting `out` per module is quadratic in
+    // principle, but bundles are a few hundred KB — not worth threading a
+    // running line counter through every push site to avoid.
+    let start_line = count_newlines(out) + 1;
+    let line_count = count_newlines(source) + usize::from(!source.ends_with('\n'));
     out.push_str(source);
     if !source.ends_with('\n') {
         out.push('\n');
     }
     out.push_str("end\n\n");
+    (start_line, line_count)
+}
+
+fn count_newlines(text: &str) -> usize {
+    text.bytes().filter(|&b| b == b'\n').count()
 }
 
 /// Escapes a string for a single-quoted Luau literal (mirrors the runtime
@@ -710,6 +792,86 @@ mod tests {
         // Invisible to the static scan means unwarned too — a dynamic
         // instance require is the supported pattern, not a miss.
         assert_eq!(bundle.unresolved, vec![]);
+    }
+
+    /// The source map's core invariant, verified against the emitted script
+    /// itself so the line accounting cannot drift from what
+    /// `write_module_factory` really wrote: every span's bundle lines are
+    /// exactly its module's source lines, for disk and embedded modules both.
+    #[test]
+    fn source_map_spans_reproduce_each_module_verbatim() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        let specs = vec![SpecEntry {
+            name: "expect.spec".to_string(),
+            path: spec,
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1000,
+        };
+        let bundle = bundle(&input).unwrap();
+
+        let lines: Vec<&str> = bundle.script.lines().collect();
+        assert!(!bundle.source_map.spans.is_empty());
+        for span in &bundle.source_map.spans {
+            let source = match &span.file {
+                Some(file) => std::fs::read_to_string(file).unwrap(),
+                None => {
+                    let embedded = EMBEDDED
+                        .iter()
+                        .find(|m| span.label.ends_with(m.name))
+                        .expect("a file-less span must be an embedded module");
+                    embedded.source.to_string()
+                }
+            };
+            let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
+            let mut src_lines = 0;
+            for (offset, src_line) in source.lines().enumerate() {
+                assert_eq!(
+                    lines[span.start_line - 1 + offset],
+                    src_line,
+                    "span for {} drifted at offset {offset}",
+                    span.label
+                );
+                src_lines += 1;
+            }
+            assert_eq!(span.line_count, src_lines, "line count for {}", span.label);
+        }
+    }
+
+    #[test]
+    fn source_map_rejects_scaffolding_lines() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        let specs = vec![SpecEntry {
+            name: "expect.spec".to_string(),
+            path: spec,
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1000,
+        };
+        let map = bundle(&input).unwrap().source_map;
+
+        let span = &map.spans[0];
+        // Body edges resolve to module-local lines…
+        let (first, line) = map.resolve(span.start_line).unwrap();
+        assert_eq!((first.label.as_str(), line), (span.label.as_str(), 1));
+        let last = span.start_line + span.line_count - 1;
+        assert_eq!(map.resolve(last).unwrap().1, span.line_count);
+        // …while the factory scaffolding on either side belongs to no module:
+        // the shim above the body, the `end` below it.
+        assert!(map.resolve(span.start_line - 1).is_none());
+        assert!(map.resolve(last + 1).is_none());
+        // The prelude and out-of-range coordinates map nowhere.
+        assert!(map.resolve(1).is_none());
+        assert!(map.resolve(0).is_none());
+        assert!(map.resolve(usize::MAX).is_none());
     }
 
     /// The other half of the field report: `require('src')` failed in the
