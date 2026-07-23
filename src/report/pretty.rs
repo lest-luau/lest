@@ -147,18 +147,32 @@ impl<W: Write> Pretty<W> {
                 failure,
             } => {
                 self.flush_pending();
-                self.record_duration(path, name, *duration_ms);
+                // `(load)` is synthesized by every backend when a spec file
+                // fails to load: nothing ran, so its hard-zero duration is a
+                // construction detail, and "(0.0ms)" dresses it up as a
+                // measurement. It renders without a timing and stays out of
+                // the slowest-tests ranking. The other synthesized outcomes —
+                // `(timeout)`, `(error)` — keep theirs, which report how long
+                // the spec really ran before it was cut short.
+                let load_failure = name == "(load)";
+                if !load_failure {
+                    self.record_duration(path, name, *duration_ms);
+                }
                 if !self.current_suite_failed {
                     self.current_suite_failed = true;
                     self.suites_failed += 1;
                 }
                 self.sync_path(path);
-                let line = format!(
-                    "{} {} {}",
-                    self.paint(RED, "✗"),
-                    self.paint(RED, name),
-                    self.paint(DIM, &format!("({})", fmt_duration(*duration_ms)))
-                );
+                let line = if load_failure {
+                    format!("{} {}", self.paint(RED, "✗"), self.paint(RED, name))
+                } else {
+                    format!(
+                        "{} {} {}",
+                        self.paint(RED, "✗"),
+                        self.paint(RED, name),
+                        self.paint(DIM, &format!("({})", fmt_duration(*duration_ms)))
+                    )
+                };
                 self.test_line(path, &line);
                 self.failure_block(path.len(), failure);
             }
@@ -417,6 +431,37 @@ mod tests {
         assert!(out.contains("Tests:       1 failed, 0 passed, 1 total"));
         assert!(out.contains("Snapshots:   0 total"));
         assert!(out.contains("Time:        0.12s"));
+    }
+
+    /// `(load)` is a synthesized outcome — nothing ran, so a timing would be
+    /// noise. It still counts as a failure and still prints its details.
+    #[test]
+    fn load_failures_render_without_a_duration_and_stay_out_of_slowest() {
+        let out = render(&[
+            Event::TestFail {
+                path: vec!["tests/engine/foo.spec.luau".into()],
+                name: "(load)".into(),
+                duration_ms: 0.0,
+                failure: Failure::Error {
+                    message: "boom".into(),
+                    trace: None,
+                },
+            },
+            // A real test, so the slowest block renders and can be inspected.
+            Event::TestPass {
+                path: vec!["s".into()],
+                name: "fast".into(),
+                duration_ms: 0.2,
+            },
+        ]);
+        assert!(out.contains("✗ (load)\n"), "no timing suffix, got: {out}");
+        assert!(out.contains("boom"));
+        assert!(out.contains("Tests:       1 failed, 1 passed, 2 total"));
+        let slowest = out.split("Slowest Tests:").nth(1).unwrap();
+        assert!(
+            !slowest.contains("(load)"),
+            "(load) must not rank as a slow test, got: {slowest}"
+        );
     }
 
     #[test]
