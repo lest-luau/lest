@@ -65,6 +65,23 @@ fn render_labeled(label: &str, code: &str, message: &str, color: bool) -> String
     format!("\n{} {}\n", paint(color, code, label), sentence(message))
 }
 
+/// Renders and prints a warning to stderr. Color is decided here by the same
+/// rule `main` uses — an argv `--no-color` (stopping at the `--` escape),
+/// `NO_COLOR`, and stderr's own terminal state — because warnings fire from
+/// places with no reporter handle: config loading runs before the CLI has
+/// computed its color flags, and the cloud bundler is plumbed for events, not
+/// diagnostics. The flags cannot change mid-process, so recomputing them here
+/// always agrees with `main`.
+pub fn warn_to_stderr(message: &str) {
+    use std::io::IsTerminal;
+    let no_color = std::env::args()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--no-color")
+        || std::env::var_os("NO_COLOR").is_some();
+    let color = !no_color && std::io::stderr().is_terminal();
+    eprint!("{}", render_warning(message, color));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
