@@ -10,6 +10,3 @@
 # Any markdown that is not README.md.
 /*.md
 !README.md
-
-# Snapshot artifact.
-__snapshots__
