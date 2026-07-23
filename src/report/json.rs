@@ -50,6 +50,19 @@ impl<W: Write> Json<W> {
         let _ = writeln!(self.out, "{value}");
     }
 
+    /// A suite-level tool failure — the backend died mid-suite — as its own
+    /// line kind, tagged like every other line. Not an `Event` for the same
+    /// reason `snapshot_failure` is not: it is a host verdict, not a
+    /// framework fact.
+    pub fn suite_error(&mut self, message: &str) {
+        let mut value = json!({ "kind": "suite_error", "message": message });
+        if let (Some((suite, backend)), Some(object)) = (&self.suite, value.as_object_mut()) {
+            object.insert("suite".to_string(), json!(suite));
+            object.insert("backend".to_string(), json!(backend));
+        }
+        let _ = writeln!(self.out, "{value}");
+    }
+
     pub fn on_event(&mut self, event: &Event) {
         let mut value = match serde_json::to_value(event) {
             Ok(value) => value,
@@ -113,6 +126,22 @@ mod tests {
         let summary: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(summary["kind"], "summary");
         assert_eq!(summary["passed"], 1);
+    }
+
+    #[test]
+    fn suite_error_is_structured_and_tagged() {
+        let mut buf = Vec::new();
+        {
+            let mut reporter = Json::new(&mut buf);
+            reporter.begin_suite("scripts", "lune");
+            reporter.suite_error("the suite did not finish: lune exited");
+        }
+        let text = String::from_utf8(buf).unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(line["kind"], "suite_error");
+        assert_eq!(line["message"], "the suite did not finish: lune exited");
+        assert_eq!(line["suite"], "scripts");
+        assert_eq!(line["backend"], "lune");
     }
 
     #[test]

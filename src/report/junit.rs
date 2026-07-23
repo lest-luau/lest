@@ -38,6 +38,11 @@ enum Outcome {
         kind: &'static str,
         detail: String,
     },
+    /// The harness broke, as opposed to an assertion verdict — JUnit's
+    /// `<failure>`/`<error>` split exists for exactly this distinction.
+    Error {
+        message: String,
+    },
     Skip {
         reason: Option<String>,
     },
@@ -83,6 +88,27 @@ impl<W: Write> Junit<W> {
                 message: format!("snapshot \"{key}\" did not match the stored value"),
                 kind: "snapshot",
                 detail: detail.to_string(),
+            },
+        });
+    }
+
+    /// A suite-level tool failure — the backend died mid-suite — as a
+    /// synthesized `<testcase>` carrying an `<error>` element. A dead backend
+    /// emits no events, so without this the document claimed the suite passed
+    /// beside exit 2. CI systems annotate testcases, so it gets one to point
+    /// at, the same trick [`snapshot_failure`](Self::snapshot_failure) uses.
+    pub fn suite_error(&mut self, message: &str) {
+        let classname = self
+            .suites
+            .last()
+            .map(|suite| suite.name.clone())
+            .unwrap_or_else(|| "lest".to_string());
+        self.push_case(JunitCase {
+            classname,
+            name: "(suite)".to_string(),
+            time_secs: 0.0,
+            outcome: Outcome::Error {
+                message: message.to_string(),
             },
         });
     }
@@ -151,6 +177,12 @@ impl<W: Write> Junit<W> {
             .flat_map(|s| &s.cases)
             .filter(|c| matches!(c.outcome, Outcome::Fail { .. }))
             .count();
+        let total_errors: usize = self
+            .suites
+            .iter()
+            .flat_map(|s| &s.cases)
+            .filter(|c| matches!(c.outcome, Outcome::Error { .. }))
+            .count();
         let total_skipped: usize = self
             .suites
             .iter()
@@ -161,10 +193,11 @@ impl<W: Write> Junit<W> {
         let _ = writeln!(self.out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         let _ = writeln!(
             self.out,
-            r#"<testsuites name="lest" tests="{}" failures="{}" skipped="{}" time="{:.3}">"#,
+            r#"<testsuites name="lest" tests="{}" failures="{}" skipped="{}" errors="{}" time="{:.3}">"#,
             total_tests,
             total_failures,
             total_skipped,
+            total_errors,
             elapsed.as_secs_f64(),
         );
 
@@ -204,6 +237,11 @@ fn write_suite<W: Write>(out: &mut W, suite: &JunitSuite) {
         .iter()
         .filter(|c| matches!(c.outcome, Outcome::Fail { .. }))
         .count();
+    let errors = suite
+        .cases
+        .iter()
+        .filter(|c| matches!(c.outcome, Outcome::Error { .. }))
+        .count();
     let skipped = suite
         .cases
         .iter()
@@ -218,11 +256,12 @@ fn write_suite<W: Write>(out: &mut W, suite: &JunitSuite) {
     };
     let _ = writeln!(
         out,
-        r#"  <testsuite name="{}" tests="{}" failures="{}" skipped="{}" time="{:.3}">"#,
+        r#"  <testsuite name="{}" tests="{}" failures="{}" skipped="{}" errors="{}" time="{:.3}">"#,
         name,
         suite.cases.len(),
         failures,
         skipped,
+        errors,
         time,
     );
 
@@ -256,6 +295,15 @@ fn write_case<W: Write>(out: &mut W, case: &JunitCase) {
                 escape_attr(message),
                 kind,
                 escape_text(detail),
+            );
+            let _ = writeln!(out, "    </testcase>");
+        }
+        Outcome::Error { message } => {
+            let _ = writeln!(out, "{open}>");
+            let _ = writeln!(
+                out,
+                r#"      <error message="{}" type="tool"/>"#,
+                escape_attr(message),
             );
             let _ = writeln!(out, "    </testcase>");
         }
@@ -410,6 +458,35 @@ mod tests {
         assert!(out.contains(r#"name="snapshot: adds &gt; result""#));
         assert!(out.contains(r#"type="snapshot""#));
         assert!(out.contains("+ 4"));
+    }
+
+    /// The regression: a backend that died mid-suite left a document claiming
+    /// the suite passed beside exit 2. It is an `<error>` (harness broke),
+    /// not a `<failure>` (assertion verdict) — that is JUnit's own split.
+    #[test]
+    fn a_suite_error_is_an_error_element_with_counts() {
+        let mut buf = Vec::new();
+        {
+            let mut junit = Junit::new(&mut buf);
+            junit.begin_suite("scripts", "lune");
+            junit.suite_error("the suite did not finish: lune exited with exit code: 1");
+            junit.finish(&Totals::default(), Duration::from_millis(5));
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains(r#"errors="1""#), "{out}");
+        assert!(
+            out.contains(r#"<testcase name="(suite)" classname="scripts""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"<error message="the suite did not finish: lune exited with exit code: 1" type="tool"/>"#),
+            "{out}"
+        );
+        // An error is not a failure; the counts stay distinct.
+        assert!(
+            out.contains(r#"tests="1" failures="0" skipped="0" errors="1""#),
+            "{out}"
+        );
     }
 
     #[test]
