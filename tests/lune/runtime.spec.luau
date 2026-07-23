@@ -1,7 +1,7 @@
 --!strict
 -- This suite runs under `backend = "lune"`: a real spawned lune process with
 -- the real @lune/* std, through the same harness seam as the lute backend.
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 local fs = require('@lune/fs')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect

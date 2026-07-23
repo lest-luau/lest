@@ -21,7 +21,9 @@ pub use coverage::{CoverageData, FileCoverage};
 pub use diagnostic::{
     note_to_stderr, render_diagnostic, render_warning, sentence, warn_to_stderr, Severity,
 };
-pub use event::{check_protocol_version, Event, Failure, Totals, PROTOCOL_VERSION};
+pub use event::{
+    check_protocol_version, Event, Failure, SnapshotMismatch, Totals, PROTOCOL_VERSION,
+};
 pub use json::Json;
 pub use junit::Junit;
 // `paint`/`BOLD`/`BOLD_RED` escape the reporters so the CLI's own output —

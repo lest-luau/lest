@@ -1,7 +1,7 @@
 --!strict
 -- This suite runs under `backend = "lute"`: a real spawned lute process with
 -- the real @lute/* std. Nothing here is mocked — that is the point.
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 local fs = require('@lute/fs')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect

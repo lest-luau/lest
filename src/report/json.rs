@@ -30,12 +30,14 @@ impl<W: Write> Json<W> {
         );
     }
 
-    /// A snapshot mismatch, as its own line kind with the parts split out.
+    /// A snapshot failure with no inline home, as its own line kind with the
+    /// parts split out.
     ///
-    /// Snapshot comparison is a host decision, so this is not an `Event` and
-    /// does not touch the protocol schema — but a consumer gating on failures
-    /// still needs it, and folding it into `note` left the key and the spec
-    /// buried in a prose blob only a human could read.
+    /// The common case never reaches this: a mismatch under a passing test is
+    /// rewritten into that test's `test_fail` (failure type `snapshot`) before
+    /// the event streams. This line carries the leftovers — a mismatch whose
+    /// test failed on its own, or whose backend died before the verdict — so
+    /// a consumer gating on failures still sees every key.
     pub fn snapshot_failure(&mut self, spec: &str, key: &str, detail: &str) {
         let mut value = json!({
             "kind": "snapshot_failure",

@@ -5,7 +5,7 @@
 -- run this spec (there is no `Instance`, `game`, or `workspace` there); that is
 -- the whole reason the cloud backend exists.
 
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 

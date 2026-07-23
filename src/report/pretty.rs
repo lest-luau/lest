@@ -107,13 +107,15 @@ impl<W: Write> Pretty<W> {
         let _ = writeln!(self.out, "{line}");
     }
 
-    /// A snapshot mismatch. Snapshots are compared CLI-side, so these never
-    /// arrive as protocol events; every reporter takes them through this method
-    /// instead, and each renders them in its own idiom (the terminal block
-    /// here, a real `<testcase>` in JUnit). `detail` is already-rendered diff
+    /// The fallback surface for a snapshot failure with no inline home — its
+    /// test failed on its own, or never streamed a verdict at all (the
+    /// backend died mid-test). A mismatch under a passing test never lands
+    /// here: the run loop rewrites that test's `test_pass` into a failure and
+    /// the diff renders inside the tree. `detail` is already-rendered diff
     /// text, so it is printed verbatim rather than dimmed.
     pub fn snapshot_failure(&mut self, spec: &str, key: &str, detail: &str) {
-        let header = self.paint(DIM, &format!("snapshot \"{key}\" in {spec}:"));
+        let _ = writeln!(self.out);
+        let header = self.paint(DIM, &format!("Snapshot \"{key}\" in {spec}:"));
         let _ = writeln!(self.out, "{header}");
         // A diff gets a legend — nothing on the `-`/`+` marks says which side
         // is the file and which is the run. Non-diff details (a duplicate
@@ -139,22 +141,6 @@ impl<W: Write> Pretty<W> {
         self.flush_pending();
         self.mark_suite_failed();
         let line = format!("{} {}", self.paint(RED, "✗"), self.paint(RED, message));
-        let _ = writeln!(self.out, "{}{line}", indent(1));
-    }
-
-    /// Snapshot mismatches in the suite that just ran. Comparison is
-    /// host-side, after each event streamed, so the tree has already printed
-    /// `✓` beside the owning tests — this line is what keeps the suite from
-    /// *reading* green, and points at the diffs printed after the tree.
-    pub fn suite_snapshot_failures(&mut self, count: usize) {
-        self.flush_pending();
-        self.mark_suite_failed();
-        let noun = if count == 1 { "snapshot" } else { "snapshots" };
-        let line = format!(
-            "{} {}",
-            self.paint(RED, "✗"),
-            self.paint(RED, &format!("{count} {noun} did not match — diffs below"))
-        );
         let _ = writeln!(self.out, "{}{line}", indent(1));
     }
 
@@ -397,6 +383,25 @@ impl<W: Write> Pretty<W> {
                     let _ = writeln!(self.out, "{pad}{line}");
                 }
             }
+            // Host-synthesized when a passing test's snapshots mismatched.
+            // Each mismatch names its key — one test can hold several
+            // snapshots, so "Expected/Received" alone would not say which
+            // call diverged — and the body is the stored-vs-received line
+            // diff, already colored, indented one level under its header.
+            // The header stays regular weight, like the Expected/Received
+            // labels: it is the failure's substance, not a dim aside.
+            Failure::Snapshot { mismatches } => {
+                for mismatch in mismatches {
+                    let _ = writeln!(
+                        self.out,
+                        "{pad}Snapshot \"{}\" did not match:",
+                        mismatch.key
+                    );
+                    for line in mismatch.detail.trim_end_matches('\n').lines() {
+                        let _ = writeln!(self.out, "{pad}  {line}");
+                    }
+                }
+            }
         }
         // Defer the trailing blank: the next test flushes it, self-spacing
         // sections (slowest block, summary, next suite) drop it — no doubling.
@@ -425,6 +430,7 @@ fn fmt_duration(ms: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::SnapshotMismatch;
 
     fn render(events: &[Event]) -> String {
         render_with(events, &SnapshotSummary::default())
@@ -615,44 +621,74 @@ mod tests {
         );
     }
 
-    /// Snapshot comparison happens host-side, after the tree printed `✓` —
-    /// the suite must still not read as passed.
+    /// Snapshot comparison happens host-side; the run loop rewrites a passing
+    /// test whose snapshots mismatched into a `test_fail` carrying the diffs.
+    /// The tree renders it like any other failure — ✗ on the owning test,
+    /// each mismatch labeled with its key, the diff indented beneath.
     #[test]
-    fn snapshot_mismatches_fail_the_suite_and_point_at_the_diffs() {
-        let mut buf = Vec::new();
-        {
-            let mut pretty = Pretty::new(&mut buf, false);
-            pretty.begin_suite("unit", "native");
-            pretty.on_event(&Event::TestPass {
-                path: vec!["Report".into()],
-                name: "renders".into(),
+    fn snapshot_mismatches_render_inline_under_the_owning_test() {
+        let out = render_with(
+            &[Event::TestFail {
+                path: vec!["snapshot store".into()],
+                name: "stores scalars".into(),
                 duration_ms: 0.1,
-            });
-            pretty.suite_snapshot_failures(2);
-            // The host hands finish the reconciled totals (the pass flipped
-            // to a failure), exactly as the run loop does.
-            pretty.finish(
-                &Totals {
-                    passed: 0,
-                    failed: 1,
-                    skipped: 0,
+                failure: Failure::Snapshot {
+                    mismatches: vec![SnapshotMismatch {
+                        key: "snapshot store > stores scalars 4".into(),
+                        detail: "- nil\n+ 3\n".into(),
+                    }],
                 },
-                &SnapshotSummary {
-                    failed: 2,
-                    ..SnapshotSummary::default()
-                },
-                Duration::from_millis(10),
-            );
-        }
-        let out = String::from_utf8(buf).unwrap();
+                origin: None,
+            }],
+            &SnapshotSummary {
+                failed: 1,
+                ..SnapshotSummary::default()
+            },
+        );
+        assert!(out.contains("✗ stores scalars"), "{out}");
         assert!(
-            out.contains("✗ 2 snapshots did not match — diffs below"),
+            out.contains(
+                "      Snapshot \"snapshot store > stores scalars 4\" did not match:\n\
+                 \x20       - nil\n\
+                 \x20       + 3\n"
+            ),
             "{out}"
         );
         assert!(
             out.contains("Test Suites: 1 failed, 0 passed, 1 total"),
             "{out}"
         );
+        assert!(
+            out.contains("Tests:       1 failed, 0 passed, 1 total"),
+            "{out}"
+        );
+        assert!(out.contains("Snapshots:   1 failed, 1 total"), "{out}");
+    }
+
+    /// One test can hold several snapshots; every mismatch renders under the
+    /// single ✗ line, each labeled with its own key.
+    #[test]
+    fn multiple_mismatches_stack_under_one_test() {
+        let out = render(&[Event::TestFail {
+            path: vec![],
+            name: "twice".into(),
+            duration_ms: 0.1,
+            failure: Failure::Snapshot {
+                mismatches: vec![
+                    SnapshotMismatch {
+                        key: "twice 1".into(),
+                        detail: "- 1\n+ 2\n".into(),
+                    },
+                    SnapshotMismatch {
+                        key: "twice 2".into(),
+                        detail: "- 3\n+ 4\n".into(),
+                    },
+                ],
+            },
+            origin: None,
+        }]);
+        assert!(out.contains("Snapshot \"twice 1\" did not match:"), "{out}");
+        assert!(out.contains("Snapshot \"twice 2\" did not match:"), "{out}");
         assert!(
             out.contains("Tests:       1 failed, 0 passed, 1 total"),
             "{out}"

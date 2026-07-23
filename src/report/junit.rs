@@ -69,16 +69,15 @@ impl<W: Write> Junit<W> {
     /// *not* notes; see [`snapshot_failure`](Self::snapshot_failure).
     pub fn note(&mut self, _message: &str) {}
 
-    /// Records a snapshot mismatch as a real `<testcase>` carrying a
-    /// `<failure type="snapshot">`.
-    ///
-    /// Snapshots are compared CLI-side, so a mismatch never arrives as a
-    /// protocol event — yet the exit code gates on it. Routing them to `note`
-    /// (a no-op here) produced a document claiming `failures="0"` alongside
-    /// exit 1: a CI system trusting the XML read the run as green and the
-    /// annotation pointed at nothing, which is the whole purpose of this
-    /// reporter. They arrive after the last suite closes, so they attach to the
-    /// suite that ran last.
+    /// Records a snapshot failure with no inline home — its test failed on
+    /// its own, or never streamed a verdict — as a synthesized `<testcase>`
+    /// carrying a `<failure type="snapshot">`. The common case never lands
+    /// here: a mismatch under a passing test arrives through the event stream
+    /// as that test's own failure, so the annotation points at the real
+    /// testcase. Dropping these leftovers instead would produce a document
+    /// undercounting `failures=` alongside exit 1 — a CI system trusting the
+    /// XML would read the run as greener than it was. They arrive after the
+    /// last suite closes, so they attach to the suite that ran last.
     pub fn snapshot_failure(&mut self, spec: &str, key: &str, detail: &str) {
         self.push_case(JunitCase {
             classname: spec.to_string(),
@@ -151,6 +150,37 @@ impl<W: Write> Junit<W> {
                         kind: "error",
                         detail: trace.clone().unwrap_or_default(),
                     },
+                    // Host-synthesized: a passing test rewritten because its
+                    // snapshots mismatched. The failure lands on the real
+                    // testcase, so CI annotations point at the test that
+                    // produced the snapshot, not a synthesized stand-in.
+                    Failure::Snapshot { mismatches } => {
+                        let message = match mismatches.as_slice() {
+                            [only] => {
+                                format!("snapshot \"{}\" did not match the stored value", only.key)
+                            }
+                            _ => format!(
+                                "{} snapshots did not match their stored values",
+                                mismatches.len()
+                            ),
+                        };
+                        let detail = mismatches
+                            .iter()
+                            .map(|mismatch| {
+                                format!(
+                                    "snapshot \"{}\":\n{}",
+                                    mismatch.key,
+                                    mismatch.detail.trim_end_matches('\n')
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        Outcome::Fail {
+                            message,
+                            kind: "snapshot",
+                            detail,
+                        }
+                    }
                 };
                 self.push(path, name, *duration_ms, outcome);
             }

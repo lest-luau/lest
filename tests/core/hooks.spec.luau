@@ -4,7 +4,7 @@
 -- state left behind by an earlier block would make any filtered run
 -- (`lest -t ...`, `--changed`, a single suite) fail spuriously — lest has to
 -- survive being pointed at its own tests.
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 local beforeAll, beforeEach, afterEach, afterAll = Lest.beforeAll, Lest.beforeEach, Lest.afterEach, Lest.afterAll
