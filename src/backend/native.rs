@@ -309,6 +309,7 @@ fn run_spec_file(plan: &SuitePlan, spec: &Path) -> SpecResult {
                 message: load_err.to_string(),
                 trace: None,
             },
+            origin: None,
         });
         let collected = std::mem::take(&mut *events.borrow_mut());
         return Ok((collected, collect_coverage(plan, &loader)));
@@ -370,6 +371,7 @@ fn run_spec_file(plan: &SuitePlan, spec: &Path) -> SpecResult {
                     message: format!("test timed out after {}ms", timeout.as_millis()),
                     trace: None,
                 },
+                origin: None,
             });
         } else {
             return Err(ToolError(format!("test run aborted: {message}")));
@@ -495,6 +497,7 @@ fn event_from_table(table: &Table) -> Result<Event, String> {
             name: get_string(table, "name")?,
             duration_ms: get_f64(table, "durationMs")?,
             failure: failure_from_table(table)?,
+            origin: get_opt_string(table, "origin")?,
         },
         "test_skip" => Event::TestSkip {
             path: get_path(table)?,

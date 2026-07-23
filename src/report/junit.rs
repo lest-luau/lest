@@ -125,6 +125,7 @@ impl<W: Write> Junit<W> {
                 name,
                 duration_ms,
                 failure,
+                ..
             } => {
                 let outcome = match failure {
                     Failure::Assertion {
@@ -417,6 +418,7 @@ mod tests {
                 expected: Some("y".into()),
                 received: Some("x".into()),
             },
+            origin: None,
         }]);
         assert!(out.contains(r#"<testsuites name="lest" tests="1" failures="1""#));
         assert!(out.contains("classname=\"a &amp; b\""));
@@ -437,6 +439,7 @@ mod tests {
                 message: "boom".into(),
                 trace: Some("at foo\nat bar".into()),
             },
+            origin: None,
         }]);
         assert!(out.contains(r#"type="error""#));
         assert!(out.contains("at foo\nat bar"));
@@ -501,6 +504,7 @@ mod tests {
                 message: "line one\nline two".into(),
                 trace: None,
             },
+            origin: None,
         }]);
         assert!(!out.contains('\u{1b}'), "raw ESC survived into the XML");
         // A literal newline in an attribute would be normalized to a space.
