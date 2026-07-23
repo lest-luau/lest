@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::report::Event;
+use crate::report::{Event, Failure};
 
 pub mod cloud;
 pub mod native;
@@ -111,6 +111,343 @@ pub fn relative_path(from: &Path, to: &Path) -> Option<String> {
     } else {
         format!("./{joined}")
     })
+}
+
+/// Whether path text folds case when compared, mirroring the platform rule
+/// `resolve::normalize` applies to real paths.
+const CASE_INSENSITIVE_PATHS: bool = cfg!(any(target_os = "windows", target_os = "macos"));
+
+fn fold_path_char(c: char) -> char {
+    if c == '\\' {
+        '/'
+    } else if CASE_INSENSITIVE_PATHS {
+        c.to_ascii_lowercase()
+    } else {
+        c
+    }
+}
+
+/// The folded form of `path` plus a trailing separator, ready for
+/// [`match_path_prefix`]. The trailing separator is what keeps a root of
+/// `/proj/app` from matching inside `/proj/appendix`.
+fn fold_needle(path: &Path) -> Vec<char> {
+    format!("{}/", path.display())
+        .chars()
+        .map(fold_path_char)
+        .collect()
+}
+
+/// Matches `needle` (a folded path) at `chars[start..]`, comparing case- and
+/// separator-insensitively. A separator in the needle matches a *run* of
+/// separators in the text, so a path quoted with escaped backslashes
+/// (`c:\\users\\…`) still matches. Returns the index just past the match.
+fn match_path_prefix(chars: &[char], start: usize, needle: &[char]) -> Option<usize> {
+    let mut i = start;
+    for &expected in needle {
+        if expected == '/' {
+            let mut separators = 0usize;
+            while i < chars.len() && fold_path_char(chars[i]) == '/' {
+                separators += 1;
+                i += 1;
+            }
+            if separators == 0 {
+                return None;
+            }
+        } else {
+            if i >= chars.len() || fold_path_char(chars[i]) != expected {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    Some(i)
+}
+
+/// Removes every occurrence of the absolute project root — any casing, either
+/// separator, even doubled by string escaping — plus its trailing separator
+/// from `text`, leaving root-relative paths behind. Failure messages and
+/// traces quote paths in whatever spelling produced them (chunk names are
+/// case-folded by `normalize`, spec paths keep discovery casing), so this
+/// works on the text rather than parsing paths out of it; text without the
+/// root passes through untouched.
+pub fn strip_root(text: &str, root: &Path) -> String {
+    let needle = fold_needle(root);
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match match_path_prefix(&chars, i, &needle) {
+            Some(next) => i = next,
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `text` begins with the path `prefix` (same folding rules) followed
+/// by a separator.
+fn starts_with_path(text: &str, prefix: &Path) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    match_path_prefix(&chars, 0, &fold_needle(prefix)).is_some()
+}
+
+/// Cleans one failure for human eyes, in place. Applied by the CLI to every
+/// `test_fail` from every backend, so the reporters and machine documents all
+/// agree:
+///
+/// - Project paths in messages, traces, and assertion values become
+///   root-relative (`src/ledger.luau:41: …` instead of an absolute path that
+///   is longer than the message).
+/// - Trace frames inside lest's own core drop out — core takes the traceback,
+///   so `protectedCall`/`run` frames appeared in every single failure — as do
+///   `[C]` frames.
+/// - mlua's framing on native errors is normalized: the `runtime error: `
+///   prefix goes, and a traceback embedded in the message (load failures)
+///   moves into the trace field where every other failure carries it.
+pub fn polish_failure(failure: &mut Failure, root: &Path, core_entry: &Path) {
+    let core_dir = core_entry.parent();
+    match failure {
+        Failure::Assertion {
+            message,
+            expected,
+            received,
+        } => {
+            *message = strip_root(message, root);
+            if let Some(expected) = expected {
+                *expected = strip_root(expected, root);
+            }
+            if let Some(received) = received {
+                *received = strip_root(received, root);
+            }
+        }
+        Failure::Error { message, trace } => {
+            if let Some(rest) = message.strip_prefix("runtime error: ") {
+                *message = rest.to_string();
+            }
+            if let Some(split) = message.find("\nstack traceback:") {
+                let embedded = message[split + 1..]
+                    .strip_prefix("stack traceback:")
+                    .unwrap_or(&message[split + 1..])
+                    .trim_matches('\n')
+                    .to_string();
+                message.truncate(split);
+                message.truncate(message.trim_end().len());
+                match trace {
+                    Some(existing) if !existing.trim().is_empty() => {
+                        existing.push('\n');
+                        existing.push_str(&embedded);
+                    }
+                    _ => *trace = Some(embedded),
+                }
+            }
+            *message = strip_root(message, root);
+            if let Some(text) = trace {
+                let filtered = filter_trace(text, root, core_dir);
+                *trace = if filtered.is_empty() {
+                    None
+                } else {
+                    Some(filtered)
+                };
+            }
+        }
+    }
+}
+
+/// Root-strips every trace line and drops the frames a reader never wants:
+/// lest's own plumbing under the core directory, and `[C]` frames. Core may
+/// appear absolute (a core outside the root) or already root-relative (cloud
+/// traces arrive source-mapped), so both spellings are tested. Frames are
+/// also unindented — mlua tab-indents its traceback lines, core's
+/// `debug.traceback` does not, and the reporter supplies its own padding.
+fn filter_trace(trace: &str, root: &Path, core_dir: Option<&Path>) -> String {
+    let core_rel: Option<PathBuf> =
+        core_dir.map(|dir| PathBuf::from(strip_root(&dir.display().to_string(), root)));
+    trace
+        .lines()
+        .filter_map(|line| {
+            let stripped = strip_root(line, root);
+            let frame = stripped.trim();
+            if frame.is_empty() || frame.starts_with("[C]") {
+                return None;
+            }
+            if let (Some(dir), Some(rel)) = (core_dir, &core_rel) {
+                if starts_with_path(frame, dir) || starts_with_path(frame, rel) {
+                    return None;
+                }
+            }
+            Some(frame.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod polish_tests {
+    use super::*;
+
+    #[test]
+    fn strip_root_removes_every_occurrence_and_keeps_the_rest() {
+        let root = Path::new("/proj/app");
+        let text = "error at /proj/app/src/mod.luau:41: boom (/proj/app/src/mod.luau:41)";
+        assert_eq!(
+            strip_root(text, root),
+            "error at src/mod.luau:41: boom (src/mod.luau:41)"
+        );
+        assert_eq!(strip_root("no paths here", root), "no paths here");
+        // The trailing separator keeps the root from matching inside a longer
+        // sibling name.
+        assert_eq!(strip_root("/proj/appendix/x", root), "/proj/appendix/x");
+    }
+
+    #[test]
+    fn strip_root_matches_across_separator_styles_and_escaping() {
+        let root = Path::new("c:\\proj\\app");
+        // Forward slashes in the text, backslashes in the root.
+        assert_eq!(strip_root("c:/proj/app/src/mod.luau", root), "src/mod.luau");
+        // Escaped backslashes, as an error message quoting a Luau string
+        // literal renders them.
+        assert_eq!(
+            strip_root(r"c:\\proj\\app\\src\\mod.luau", root),
+            r"src\\mod.luau"
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn strip_root_folds_case_on_case_insensitive_hosts() {
+        // Chunk names arrive case-folded by `normalize`; spec paths keep
+        // their discovery casing. Both spellings must strip.
+        let root = Path::new("C:\\Proj\\App");
+        assert_eq!(
+            strip_root("c:\\proj\\app\\src\\mod.luau", root),
+            "src\\mod.luau"
+        );
+        assert_eq!(
+            strip_root("C:\\Proj\\App\\src\\mod.luau", root),
+            "src\\mod.luau"
+        );
+    }
+
+    #[test]
+    fn polish_normalizes_a_native_load_failure() {
+        let root = Path::new("/proj/app");
+        let core = Path::new("/proj/app/.lest/core/init.luau");
+        let mut failure = Failure::Error {
+            message: "runtime error: cannot resolve require(\"../x\"): no file at\n  \
+                      /proj/app/src/x.luau\n\
+                      stack traceback:\n\
+                      \t[C]: in function 'error'\n\
+                      \t/proj/app/.lest/core/init.luau:104: in function 'describe'\n\
+                      \t/proj/app/spec.luau:5: in function <spec.luau:1>"
+                .to_string(),
+            trace: None,
+        };
+        polish_failure(&mut failure, root, core);
+        let Failure::Error { message, trace } = failure else {
+            panic!("variant changed");
+        };
+        // Prefix gone, embedded traceback moved out, paths relative.
+        assert_eq!(
+            message,
+            "cannot resolve require(\"../x\"): no file at\n  src/x.luau"
+        );
+        // `[C]` and core frames dropped; the spec frame survives, unindented.
+        assert_eq!(
+            trace.as_deref(),
+            Some("spec.luau:5: in function <spec.luau:1>")
+        );
+    }
+
+    #[test]
+    fn polish_drops_core_frames_from_ordinary_traces() {
+        let root = Path::new("/proj/app");
+        let core = Path::new("/proj/app/.lest/core/init.luau");
+        let mut failure = Failure::Error {
+            message: "/proj/app/src/ledger.luau:41: unknown account 'ghost'".to_string(),
+            trace: Some(
+                "/proj/app/.lest/core/init.luau:307\n\
+                 /proj/app/src/ledger.luau:41 function balance\n\
+                 /proj/app/tests/ledger.spec.luau:28 function level3\n\
+                 /proj/app/.lest/core/init.luau:306 function protectedCall\n\
+                 /proj/app/.lest/core/init.luau:557 function run"
+                    .to_string(),
+            ),
+        };
+        polish_failure(&mut failure, root, core);
+        let Failure::Error { message, trace } = failure else {
+            panic!("variant changed");
+        };
+        assert_eq!(message, "src/ledger.luau:41: unknown account 'ghost'");
+        assert_eq!(
+            trace.as_deref(),
+            Some(
+                "src/ledger.luau:41 function balance\n\
+                 tests/ledger.spec.luau:28 function level3"
+            )
+        );
+    }
+
+    /// Cloud traces arrive already source-mapped to root-relative paths; core
+    /// frames must drop in that spelling too, and a dogfood-style core
+    /// outside `.lest` (settings.core) works the same way.
+    #[test]
+    fn polish_drops_relative_core_frames_from_mapped_traces() {
+        let root = Path::new("/proj/app");
+        let core = Path::new("/proj/app/luau/core/init.luau");
+        let mut failure = Failure::Error {
+            message: "tests/engine/foo.spec.luau:12: boom".to_string(),
+            trace: Some(
+                "luau/core/init.luau:306 function protectedCall\n\
+                 tests/engine/foo.spec.luau:12 function explode"
+                    .to_string(),
+            ),
+        };
+        polish_failure(&mut failure, root, core);
+        let Failure::Error { trace, .. } = failure else {
+            panic!("variant changed");
+        };
+        assert_eq!(
+            trace.as_deref(),
+            Some("tests/engine/foo.spec.luau:12 function explode")
+        );
+    }
+
+    #[test]
+    fn polish_empties_an_all_plumbing_trace_to_none() {
+        let root = Path::new("/proj/app");
+        let core = Path::new("/proj/app/.lest/core/init.luau");
+        let mut failure = Failure::Error {
+            message: "boom".to_string(),
+            trace: Some("/proj/app/.lest/core/init.luau:307\n[C]: in ?".to_string()),
+        };
+        polish_failure(&mut failure, root, core);
+        let Failure::Error { trace, .. } = failure else {
+            panic!("variant changed");
+        };
+        assert_eq!(trace, None);
+    }
+
+    #[test]
+    fn polish_relativizes_assertion_values() {
+        let root = Path::new("/proj/app");
+        let core = Path::new("/proj/app/.lest/core/init.luau");
+        let mut failure = Failure::Assertion {
+            message: "expected error message to contain \"other words\"".to_string(),
+            expected: Some("\"other words\"".to_string()),
+            received: Some("/proj/app/src/money.luau:28: allocate needs a ratio".to_string()),
+        };
+        polish_failure(&mut failure, root, core);
+        let Failure::Assertion { received, .. } = failure else {
+            panic!("variant changed");
+        };
+        assert_eq!(
+            received.as_deref(),
+            Some("src/money.luau:28: allocate needs a ratio")
+        );
+    }
 }
 
 #[cfg(test)]
