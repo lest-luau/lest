@@ -24,11 +24,26 @@ use crate::error::ToolError;
 
 pub const DEFAULT_BASE: &str = "https://apis.roblox.com/cloud/v2";
 
+/// Base for the place-publishing API, which predates Open Cloud v2 and lives
+/// under its own path family. Verified against the documented `Update Place`
+/// endpoint: `POST /universes/v1/{universeId}/places/{placeId}/versions`.
+pub const PUBLISH_BASE: &str = "https://apis.roblox.com/universes/v1";
+
 /// One HTTP exchange. `body` is `Some` for POST, `None` for GET.
 pub struct HttpRequest {
     pub method: Method,
     pub url: String,
-    pub body: Option<String>,
+    pub body: Option<RequestBody>,
+}
+
+/// What a POST carries. Task submission speaks JSON; a place upload is the
+/// `.rbxl`/`.rbxlx` file's raw bytes with their own media type.
+pub enum RequestBody {
+    Json(String),
+    Bytes {
+        bytes: Vec<u8>,
+        content_type: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,9 +130,13 @@ impl Transport for UreqTransport {
         .set("x-api-key", api_key);
 
         let result = match request.body {
-            Some(body) => req
+            Some(RequestBody::Json(body)) => req
                 .set("Content-Type", "application/json")
                 .send_string(&body),
+            Some(RequestBody::Bytes {
+                bytes,
+                content_type,
+            }) => req.set("Content-Type", content_type).send_bytes(&bytes),
             None => req.call(),
         };
 
@@ -205,6 +224,11 @@ pub struct Session<'a, T: Transport> {
     api_key: &'a str,
     universe_id: &'a str,
     place_id: &'a str,
+    /// When set, execution tasks are created against this exact place version
+    /// rather than whatever the place currently holds — the difference between
+    /// "the version the CLI just uploaded" and "whatever someone last left
+    /// there".
+    place_version: Option<u64>,
 }
 
 impl<'a, T: Transport> Session<'a, T> {
@@ -219,7 +243,13 @@ impl<'a, T: Transport> Session<'a, T> {
             api_key,
             universe_id,
             place_id,
+            place_version: None,
         }
+    }
+
+    /// Pins every subsequent execution task to `version`.
+    pub fn pin_place_version(&mut self, version: u64) {
+        self.place_version = Some(version);
     }
 
     /// Submits a script as a new Luau-execution session task, retrying
@@ -257,13 +287,103 @@ impl<'a, T: Transport> Session<'a, T> {
         }
     }
 
+    /// Uploads a place file as a new *saved* version of the session's place
+    /// and returns its version number, retrying transient failures against
+    /// `deadline` with the same rationale as [`submit`](Self::submit) — a
+    /// retried upload can at worst leave an extra saved version behind, while
+    /// a hard-failed CI run cannot be bounded by anything. `Saved` rather than
+    /// `Published` because the caller pins tasks to the returned version
+    /// anyway, so publishing would only touch what live players see.
+    pub fn upload_place(
+        &self,
+        bytes: Vec<u8>,
+        content_type: &'static str,
+        deadline: Instant,
+    ) -> Result<u64, ToolError> {
+        let mut delay = Duration::from_millis(600);
+        let cap = Duration::from_secs(5);
+        loop {
+            match self.upload_attempt(bytes.clone(), content_type) {
+                Ok(version) => return Ok(version),
+                Err(RequestFailure::Fatal(err)) => return Err(err),
+                Err(RequestFailure::Transient { error, retry_after }) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(error);
+                    }
+                    let wait = retry_after.map_or(delay, |requested| requested.max(delay));
+                    sleep(wait.min(remaining));
+                    delay = (delay * 2).min(cap);
+                }
+            }
+        }
+    }
+
+    /// One upload attempt, classifying its failure so
+    /// [`upload_place`](Self::upload_place) can decide whether to try again.
+    fn upload_attempt(
+        &self,
+        bytes: Vec<u8>,
+        content_type: &'static str,
+    ) -> Result<u64, RequestFailure> {
+        let url = format!(
+            "{PUBLISH_BASE}/{}/places/{}/versions?versionType=Saved",
+            self.universe_id, self.place_id
+        );
+        let response = self
+            .transport
+            .send(
+                HttpRequest {
+                    method: Method::Post,
+                    url,
+                    body: Some(RequestBody::Bytes {
+                        bytes,
+                        content_type,
+                    }),
+                },
+                self.api_key,
+            )
+            .map_err(|error| RequestFailure::Transient {
+                error,
+                retry_after: None,
+            })?;
+        if !(200..300).contains(&response.status) {
+            let mut error = self.status_error("uploading the place file", &response);
+            // The Luau-execution scope does not cover publishing; the reader
+            // staring at a 401/403 needs the scope named, not just the status.
+            if response.status == 401 || response.status == 403 {
+                error = ToolError(format!(
+                    "{error}\nuploading needs the universe-places write scope on the API key"
+                ));
+            }
+            return Err(if is_retryable(response.status) {
+                RequestFailure::Transient {
+                    error,
+                    retry_after: response.retry_after,
+                }
+            } else {
+                RequestFailure::Fatal(error)
+            });
+        }
+        parse_version_number(&response.body).map_err(RequestFailure::Fatal)
+    }
+
     /// One submit attempt, classifying its failure so [`submit`](Self::submit)
     /// can decide whether to try again.
     fn submit_attempt(&self, script: &str) -> Result<Task, RequestFailure> {
-        let url = format!(
-            "{DEFAULT_BASE}/universes/{}/places/{}/luau-execution-session-tasks",
-            self.universe_id, self.place_id
-        );
+        // The version-scoped path is the same resource one level deeper; an
+        // unpinned session runs against the place's latest version, exactly as
+        // before pinning existed.
+        let url = match self.place_version {
+            Some(version) => format!(
+                "{DEFAULT_BASE}/universes/{}/places/{}/versions/{version}/luau-execution-session-tasks",
+                self.universe_id, self.place_id
+            ),
+            None => format!(
+                "{DEFAULT_BASE}/universes/{}/places/{}/luau-execution-session-tasks",
+                self.universe_id, self.place_id
+            ),
+        };
         let body = serde_json::json!({ "script": script }).to_string();
         let response = self
             .transport
@@ -271,7 +391,7 @@ impl<'a, T: Transport> Session<'a, T> {
                 HttpRequest {
                     method: Method::Post,
                     url,
-                    body: Some(body),
+                    body: Some(RequestBody::Json(body)),
                 },
                 self.api_key,
             )
@@ -513,6 +633,18 @@ fn parse_task(body: &str) -> Result<Task, ToolError> {
     Ok(Task { path, state, raw })
 }
 
+/// Parses the place-publishing response, `{"versionNumber": N}`.
+fn parse_version_number(body: &str) -> Result<u64, ToolError> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|raw| raw.get("versionNumber").and_then(Value::as_u64))
+        .ok_or_else(|| {
+            ToolError(format!(
+                "the place upload succeeded but the response carries no versionNumber\nbody: {body}"
+            ))
+        })
+}
+
 /// Extracts `output.results` (an array) from a completed task JSON.
 fn extract_results(raw: &Value) -> Option<Vec<Value>> {
     raw.get("output")
@@ -737,6 +869,89 @@ mod tests {
         assert!(err.to_string().contains("403"), "{err}");
         // Submit plus exactly one poll — no wasted retries against a 4xx.
         assert_eq!(transport.seen.borrow().len(), 2);
+    }
+
+    #[test]
+    fn upload_place_returns_the_saved_version_number() {
+        let transport = ScriptedTransport::new(vec![ok(r#"{"versionNumber":41}"#)]);
+        let session = Session::new(&transport, "key", "1", "2");
+        let version = session
+            .upload_place(
+                vec![1, 2, 3],
+                "application/octet-stream",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(version, 41);
+        let seen = transport.seen.borrow();
+        assert_eq!(seen[0].0, Method::Post);
+        // The publish API lives under its own base, not cloud v2, and the
+        // upload is a *saved* version — pinning makes Published unnecessary.
+        assert!(seen[0].1.starts_with(PUBLISH_BASE), "{}", seen[0].1);
+        assert!(
+            seen[0]
+                .1
+                .ends_with("/1/places/2/versions?versionType=Saved"),
+            "{}",
+            seen[0].1
+        );
+    }
+
+    #[test]
+    fn a_forbidden_upload_names_the_missing_scope_and_stops() {
+        let transport = ScriptedTransport::new(vec![status(403, r#"{"message":"forbidden"}"#)]);
+        let session = Session::new(&transport, "key", "1", "2");
+        let err = session
+            .upload_place(
+                vec![1],
+                "application/octet-stream",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("universe-places"), "{message}");
+        // Exactly one attempt — a rejected key cannot be retried into working.
+        assert_eq!(transport.seen.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_throttled_upload_is_retried() {
+        let throttled = status(429, r#"{"message":"Too many requests"}"#);
+        let accepted = ok(r#"{"versionNumber":7}"#);
+        let transport = ScriptedTransport::new(vec![throttled, accepted]);
+        let session = Session::new(&transport, "key", "1", "2");
+        let version = session
+            .upload_place(
+                vec![1],
+                "application/octet-stream",
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(version, 7);
+        assert_eq!(transport.seen.borrow().len(), 2);
+    }
+
+    /// Pinning is the point of uploading: the task must name the exact
+    /// version the CLI just saved, not "whatever the place currently holds".
+    #[test]
+    fn a_pinned_session_submits_against_the_exact_version() {
+        let submit = ok(r#"{"path":"t/abc","state":"QUEUED"}"#);
+        let complete = ok(r#"{"path":"t/abc","state":"COMPLETE",
+                "output":{"results":[[{"kind":"run_end","passed":1,"failed":0,"skipped":0}]]}}"#);
+        let transport = ScriptedTransport::new(vec![submit, complete]);
+        let mut session = Session::new(&transport, "key", "1", "2");
+        session.pin_place_version(41);
+        session
+            .run_script("return {}", Duration::from_secs(30))
+            .unwrap();
+        let seen = transport.seen.borrow();
+        assert!(
+            seen[0]
+                .1
+                .contains("/places/2/versions/41/luau-execution-session-tasks"),
+            "{}",
+            seen[0].1
+        );
     }
 
     #[test]
