@@ -56,6 +56,11 @@ struct RawConfig {
 struct RawCloud {
     universe_id: Option<CloudId>,
     place_id: Option<CloudId>,
+    /// Root-relative path to a built place file (`.rbxl`/`.rbxlx`). When set,
+    /// the cloud backend uploads it as a new saved version before running —
+    /// skipped when the content hash is unchanged — and pins every task to
+    /// that version.
+    place_file: Option<String>,
 }
 
 /// A Roblox identifier that may be written as a bare TOML integer or a quoted
@@ -96,12 +101,10 @@ struct RawSuite {
 struct RawSettings {
     timeout_ms: Option<u64>,
     workers: Option<usize>,
-    // Parsed and validated but not yet consumed: the cloud backend has shipped
-    // without needing it (it bundles the specs rather than building a place),
-    // so `rojo` waits on the rojo build/publish path that replaces the bundle.
-    // Accepted so configs written for it are not rejected in the meantime —
-    // and named back to the reader by `config_warnings`, so acceptance never
-    // reads as support.
+    /// Rojo project file (root-relative) describing how the filesystem maps
+    /// into the place. Consumed by the cloud backend: string requires whose
+    /// targets it maps to place ModuleScripts delegate to the engine's
+    /// `require` instead of bundling a private copy.
     rojo: Option<String>,
     core: Option<String>,
 }
@@ -120,13 +123,16 @@ pub struct Suite {
 }
 
 /// Open Cloud identifiers resolved for a suite (per-suite overriding
-/// top-level). Either field may still be `None` when nothing supplied it; the
+/// top-level). Either id may still be `None` when nothing supplied it; the
 /// cloud backend turns a missing id into a clear tool error at run time. Never
 /// holds the API key — that is environment-only.
 #[derive(Debug, Clone, Default)]
 pub struct CloudTarget {
     pub universe_id: Option<String>,
     pub place_id: Option<String>,
+    /// Root-relative path to a place file to upload (hash-skipped) and pin
+    /// tasks to. `None` means run against the place's latest version.
+    pub place_file: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +146,9 @@ pub struct Config {
     /// materialized into `.lest/core`. Setting it opts out, which is how this
     /// repo dogfoods its own working copy of the framework.
     pub core: Option<String>,
+    /// Root-relative rojo project file (`settings.rojo`), consumed by the
+    /// cloud backend for place mapping.
+    pub rojo: Option<String>,
     /// Coverage settings (native suites only).
     pub coverage: Coverage,
     /// The `lest.toml` this config was read from, or `None` in zero-config
@@ -209,29 +218,22 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
     Ok((config, root))
 }
 
-/// The `settings.rojo` warning body. The key is parsed and validated so a
-/// config written ahead of the rojo build/publish milestone is not rejected —
-/// but a key that is accepted and silently ignored looks exactly like a
-/// working feature (a field report probed cloud path mapping for a run before
-/// concluding it did not exist), so its presence is named on every load until
-/// it is consumed.
-const ROJO_UNCONSUMED: &str = "the settings.rojo key is not consumed yet — cloud suites bundle \
-    string requires from disk rather than mapping them through the project file";
-
 /// Every warning a parsed config earns. Serde drops what it does not
 /// recognize, which is the tolerance we want — but silently, which is not:
 /// `bakcend = "lune"` runs every spec on native and `deafult = false` leaves a
-/// cloud suite enabled, both looking exactly like a working config. The same
-/// goes for a known key that nothing consumes yet. Split from [`load`] so the
-/// triggers and wording are testable without capturing stderr.
+/// cloud suite enabled, both looking exactly like a working config. Split from
+/// [`load`] so the triggers and wording are testable without capturing
+/// stderr. (When a key is accepted ahead of being consumed — as
+/// `settings.rojo` once was — its unconsumed state belongs here too, so
+/// acceptance never reads as support.)
 fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
+    // `raw` is unused today but stays: warnings about parsed-but-unconsumed
+    // keys read it, and the signature is the seam they return through.
+    let _ = raw;
     let mut warnings = Vec::new();
     let unknown = unknown_keys(text);
     if !unknown.is_empty() {
         warnings.push(unknown_keys_message(&unknown, path));
-    }
-    if raw.settings.rojo.is_some() {
-        warnings.push(ROJO_UNCONSUMED.to_string());
     }
     warnings
 }
@@ -259,7 +261,7 @@ fn unknown_keys(text: &str) -> Vec<String> {
     const SUITE: &[&str] = &["include", "backend", "default", "cloud"];
     const SETTINGS: &[&str] = &["timeout_ms", "workers", "rojo", "core"];
     const COVERAGE: &[&str] = &["exclude", "min"];
-    const CLOUD: &[&str] = &["universe_id", "place_id"];
+    const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
 
     fn collect(prefix: &str, table: &toml::Table, known: &[&str], out: &mut Vec<String>) {
         for key in table.keys() {
@@ -308,12 +310,13 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
     let default_backend = raw.backend.unwrap_or(BackendKind::Native);
     let top_universe = raw.cloud.universe_id.clone().map(CloudId::into_string);
     let top_place = raw.cloud.place_id.clone().map(CloudId::into_string);
+    let top_place_file = raw.cloud.place_file.clone();
 
     let mut suites: Vec<Suite> = raw
         .suites
         .into_iter()
         .map(|(name, suite)| {
-            // Per-suite id wins; otherwise inherit the top-level `[cloud]` id.
+            // Per-suite value wins; otherwise inherit the top-level `[cloud]`.
             let universe_id = suite
                 .cloud
                 .universe_id
@@ -324,6 +327,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
                 .place_id
                 .map(CloudId::into_string)
                 .or_else(|| top_place.clone());
+            let place_file = suite.cloud.place_file.or_else(|| top_place_file.clone());
             Suite {
                 name,
                 include: suite.include,
@@ -332,6 +336,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
                 cloud: CloudTarget {
                     universe_id,
                     place_id,
+                    place_file,
                 },
             }
         })
@@ -355,6 +360,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
             cloud: CloudTarget {
                 universe_id: top_universe,
                 place_id: top_place,
+                place_file: top_place_file,
             },
         });
     }
@@ -374,6 +380,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         timeout: Duration::from_millis(raw.settings.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
         workers: raw.settings.workers.unwrap_or(0),
         core: raw.settings.core,
+        rojo: raw.settings.rojo,
         coverage,
         // Filled in by `load`, which is the only place that knows the path.
         file: None,
@@ -486,21 +493,45 @@ mod tests {
         assert_eq!(config.coverage.exclude, vec!["Packages/**"]);
     }
 
-    /// `settings.rojo` is accepted for forward compatibility but consumed by
-    /// nothing — silence would let it read as a working feature.
     #[test]
-    fn a_set_rojo_key_is_warned_about_until_consumed() {
-        let text = "[settings]\nrojo = \"default.project.json\"\n";
-        let raw: RawConfig = toml::from_str(text).unwrap();
-        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
-        assert_eq!(warnings, vec![ROJO_UNCONSUMED.to_string()]);
+    fn place_file_inherits_top_level_and_suite_override_wins() {
+        let config = parse(
+            r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+            backend = "cloud"
+
+            [suites.other]
+            include = ["tests/other/**"]
+            backend = "cloud"
+
+            [suites.other.cloud]
+            place_file = "other-place.rbxl"
+
+            [cloud]
+            universe_id = 1
+            place_id = 2
+            place_file = "test-place.rbxl"
+            "#,
+        );
+        let engine = config.suites.iter().find(|s| s.name == "engine").unwrap();
+        assert_eq!(engine.cloud.place_file.as_deref(), Some("test-place.rbxl"));
+        let other = config.suites.iter().find(|s| s.name == "other").unwrap();
+        assert_eq!(other.cloud.place_file.as_deref(), Some("other-place.rbxl"));
     }
 
+    /// `settings.rojo` was warned about while it was accepted-but-unconsumed;
+    /// now that the cloud backend consumes it, setting it must be silent.
     #[test]
-    fn an_unset_rojo_key_earns_no_warning() {
-        let text = "[suites.unit]\ninclude = [\"src/**\"]\n";
+    fn a_set_rojo_key_is_consumed_and_earns_no_warning() {
+        let text = "[settings]\nrojo = \"default.project.json\"\n";
         let raw: RawConfig = toml::from_str(text).unwrap();
         assert!(config_warnings(text, &raw, Path::new("lest.toml")).is_empty());
+        assert_eq!(
+            parse(text).rojo.as_deref(),
+            Some("default.project.json"),
+            "the key must land in the resolved config"
+        );
     }
 
     /// A typo'd key parses fine and does nothing, which is the failure mode

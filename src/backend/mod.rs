@@ -32,6 +32,11 @@ pub struct SuitePlan {
     pub name_filter: Option<String>,
     /// Compile specs with Luau coverage instrumentation (native only).
     pub coverage: bool,
+    /// Absolute path to the rojo project file (`settings.rojo`), when set.
+    /// Only the cloud backend consults it: string requires whose targets it
+    /// maps into the place delegate to the engine's `require` instead of
+    /// bundling a private copy.
+    pub rojo_project: Option<PathBuf>,
 }
 
 /// Root-relative display form of a spec path, with forward slashes.

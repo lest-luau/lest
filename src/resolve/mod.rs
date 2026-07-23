@@ -24,11 +24,11 @@
 //! Resolution is a self-contained unit with a complete public API, exercised
 //! end to end by its own tests and kept importing nothing from the rest of the
 //! crate — extracting it into its own crate stays a directory move plus a
-//! manifest. Some of that API has no caller in the CLI *yet*
-//! ([`VirtualDataModel`] waits on the rojo build path), and some exists for
-//! callers rather than for us ([`cache_key`], [`content_hash`]). Trimming to
-//! only what `main` reaches today would make the boundary a fiction, so the
-//! lint is off here and nowhere else.
+//! manifest. Some of that API has no caller in the CLI *yet* (parts of
+//! [`VirtualDataModel`] beyond the cloud bundler's mapping queries), and some
+//! exists for callers rather than for us ([`cache_key`], [`content_hash`]).
+//! Trimming to only what `main` reaches today would make the boundary a
+//! fiction, so the lint is off here and nowhere else.
 
 #![allow(dead_code)]
 

@@ -7,7 +7,7 @@
 //! else in the crate — [`sentence`] is the one place they become sentences, so
 //! the same string can be a fatal error here and a running-log note elsewhere.
 
-use super::pretty::{paint, BOLD_RED, BOLD_YELLOW};
+use super::pretty::{paint, BOLD_RED, BOLD_YELLOW, DIM};
 
 /// Capitalizes a message fragment into the diagnostic voice: the first letter
 /// is uppercased and a single trailing period is stripped — a rendered
@@ -65,21 +65,33 @@ fn render_labeled(label: &str, code: &str, message: &str, color: bool) -> String
     format!("\n{} {}\n", paint(color, code, label), sentence(message))
 }
 
-/// Renders and prints a warning to stderr. Color is decided here by the same
-/// rule `main` uses — an argv `--no-color` (stopping at the `--` escape),
-/// `NO_COLOR`, and stderr's own terminal state — because warnings fire from
-/// places with no reporter handle: config loading runs before the CLI has
-/// computed its color flags, and the cloud bundler is plumbed for events, not
-/// diagnostics. The flags cannot change mid-process, so recomputing them here
-/// always agrees with `main`.
-pub fn warn_to_stderr(message: &str) {
+/// Whether stderr output should be colored, decided by the same rule `main`
+/// uses — an argv `--no-color` (stopping at the `--` escape), `NO_COLOR`, and
+/// stderr's own terminal state. Recomputed here because the callers of
+/// [`warn_to_stderr`]/[`note_to_stderr`] have no reporter handle: config
+/// loading runs before the CLI has computed its color flags, and the cloud
+/// backend is plumbed for events, not diagnostics. The flags cannot change
+/// mid-process, so this always agrees with `main`.
+fn stderr_color() -> bool {
     use std::io::IsTerminal;
     let no_color = std::env::args()
         .take_while(|a| a != "--")
         .any(|a| a == "--no-color")
         || std::env::var_os("NO_COLOR").is_some();
-    let color = !no_color && std::io::stderr().is_terminal();
-    eprint!("{}", render_warning(message, color));
+    !no_color && std::io::stderr().is_terminal()
+}
+
+/// Renders and prints a warning to stderr.
+pub fn warn_to_stderr(message: &str) {
+    eprint!("{}", render_warning(message, stderr_color()));
+}
+
+/// Prints a note — the dim lowercase voice — to stderr, for progress from
+/// places with no reporter handle. stderr rather than stdout because stdout
+/// belongs to the reporters: a stray line there corrupts `--reporter json`
+/// output and lcov streams.
+pub fn note_to_stderr(message: &str) {
+    eprintln!("{}", paint(stderr_color(), DIM, message));
 }
 
 #[cfg(test)]

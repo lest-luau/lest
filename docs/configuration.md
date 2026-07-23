@@ -127,6 +127,17 @@ Dashboard URL for your experience and place; they are **not** secret.
 | --- | --- | --- |
 | `universe_id` | integer or string | The experience |
 | `place_id` | integer or string | The place the task runs in |
+| `place_file` | string | A built `.rbxl`/`.rbxlx` to upload before running |
+
+When `place_file` is set (root-relative), every cloud run makes sure the place
+holds exactly that file: the file is uploaded as a new **saved** version —
+skipped when its content hash matches the last upload, recorded in
+`.lest/place-versions.json` — and every task is **pinned** to that version.
+Without it, tasks run against whatever the place currently holds, which is
+fine for an empty place and a foot-gun for a populated one: forget to publish
+after a fixture change and the suite quietly tests last week's place. The
+upload needs the **universe-places write** scope on the API key, alongside the
+Luau-execution scope.
 
 The API key is deliberately **not** configurable here. It's read from
 `ROBLOX_API_KEY` or `LEST_API_KEY` in the environment, or from a `.env` file at
@@ -155,14 +166,32 @@ Native-backend worker threads.
 
 ### `rojo`
 
-Path to the rojo project file.
+Path to the rojo project file, relative to the project root.
 
 - **Type:** string
 - **Default:** unset
 
-Accepted but not yet consumed — the value is read from the file and otherwise
-ignored, including whether the path exists. It lands with the rojo build/publish
-path for the cloud backend. Setting it today changes nothing.
+Consumed by the **cloud** backend. When set, a string require whose target the
+project file maps to a ModuleScript in the place is **delegated**: instead of
+bundling a private copy of the module, the generated require walks to the live
+instance and hands it to the engine's own `require`. The spec and the place's
+own code then share one module through the engine's cache — a plain
+`require('../packages/thing/src')` reaches the same singleton the place's
+scripts see, with full static types in your editor and no
+`require(instance) :: typeof(require('path'))` two-step.
+
+Details worth knowing:
+
+- Only targets mapped to a **ModuleScript** delegate; anything else (a mapped
+  `Script`, a folder, an unmapped file) bundles exactly as before.
+- lest/core never delegates, even if your project file maps it — the framework
+  must be the copy your CLI shipped, or a stale place could supply an older
+  one.
+- If the mapped instance is missing at run time, the test fails with the
+  mapped path and a pointer at the likely cause (a stale place) — pair
+  `settings.rojo` with `[cloud] place_file` and that failure mode disappears.
+- The other backends ignore this key; requires there resolve on disk as
+  always.
 
 ### `core`
 

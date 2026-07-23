@@ -18,11 +18,12 @@
 pub mod api;
 pub mod bundle;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::report::{check_protocol_version, Event, Failure};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{display_rel, EventSink, SuitePlan};
@@ -46,6 +47,7 @@ pub fn run(
 ) -> Result<(), ToolError> {
     let api_key = api_key()?;
     let (universe_id, place_id) = resolve_target(plan, target)?;
+    let place_file = target.place_file.as_ref().map(|file| plan.root.join(file));
     let transport = UreqTransport::new();
     run_with_transport(
         plan,
@@ -53,6 +55,7 @@ pub fn run(
         &api_key,
         &universe_id,
         &place_id,
+        place_file.as_deref(),
         on_event,
     )
 }
@@ -65,9 +68,10 @@ fn run_with_transport<T: Transport>(
     api_key: &str,
     universe_id: &str,
     place_id: &str,
+    place_file: Option<&Path>,
     on_event: &mut EventSink,
 ) -> Result<(), ToolError> {
-    let session = Session::new(transport, api_key, universe_id, place_id);
+    let mut session = Session::new(transport, api_key, universe_id, place_id);
 
     // `plan.timeout` is a *per-test* budget, but the in-engine scheduler
     // deadline governs a whole spec file — the engine has no preemption, so
@@ -85,6 +89,32 @@ fn run_with_transport<T: Transport>(
     // The overall HTTP deadline covers the in-engine budget plus queueing and
     // network on top of it.
     let overall = budget.saturating_add(Duration::from_secs(120));
+
+    // The upload comes before anything runs, and every task pins the version
+    // it produced (or the one already stamped): a run is only honest about
+    // the place it claims to test if the place actually holds that content.
+    if let Some(file) = place_file {
+        // Guarded like every other `Instant + Duration` on unvalidated config.
+        let deadline = Instant::now()
+            .checked_add(overall)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
+        let version =
+            ensure_place_version(&session, file, &plan.root, universe_id, place_id, deadline)?;
+        session.pin_place_version(version);
+    }
+
+    // `settings.rojo`, consumed: string requires whose targets the project
+    // file maps into the place delegate to the engine's require instead of
+    // silently bundling a private copy. Parsed once per suite; a missing or
+    // malformed project file is a tool error, not a silent fall-back to
+    // bundling — a config that names a project expects it honored.
+    let place_map = match &plan.rojo_project {
+        Some(project) => Some(
+            crate::resolve::VirtualDataModel::from_project_file(project)
+                .map_err(|e| ToolError(e.to_string()))?,
+        ),
+        None => None,
+    };
 
     let mut outcomes = 0usize;
     // One task per spec file means lest/core is emitted into every bundle;
@@ -106,6 +136,7 @@ fn run_with_transport<T: Transport>(
             specs: &specs,
             name_filter: plan.name_filter.as_deref(),
             deadline_ms,
+            place: place_map.as_ref(),
         };
         let bundle::Bundle {
             script,
@@ -193,6 +224,90 @@ fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
         miss.line,
         miss.reason
     )
+}
+
+/// The `.lest/place-versions.json` stamp: for each `universe/place` target,
+/// the content hash of the last place file uploaded there and the version it
+/// saved as. A matching hash skips the upload and pins to the recorded
+/// version; a missing or unreadable stamp merely costs one redundant upload.
+#[derive(Default, Serialize, Deserialize)]
+struct UploadStamps {
+    #[serde(flatten)]
+    targets: HashMap<String, UploadStamp>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadStamp {
+    hash: String,
+    version: u64,
+}
+
+/// The place version the suite's tasks should pin: the stamped one when the
+/// file's content hash is unchanged, otherwise a fresh upload's. Progress goes
+/// to stderr in the note voice — an upload can take a while, and a run
+/// pinned to a version the reader cannot see invites "which place did this
+/// even test?".
+fn ensure_place_version<T: Transport>(
+    session: &Session<T>,
+    place_file: &Path,
+    root: &Path,
+    universe_id: &str,
+    place_id: &str,
+    deadline: Instant,
+) -> Result<u64, ToolError> {
+    let bytes = std::fs::read(place_file).map_err(|e| {
+        ToolError(format!(
+            "cannot read the place file {}: {e}",
+            place_file.display()
+        ))
+    })?;
+    let hash = format!("{:016x}", crate::resolve::hash_bytes(&bytes));
+    let stamp_path = root.join(".lest").join("place-versions.json");
+    let key = format!("{universe_id}/{place_id}");
+
+    let mut stamps: UploadStamps = std::fs::read_to_string(&stamp_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if let Some(stamp) = stamps.targets.get(&key) {
+        if stamp.hash == hash {
+            crate::report::note_to_stderr(&format!(
+                "place file unchanged — tasks pinned to version {}",
+                stamp.version
+            ));
+            return Ok(stamp.version);
+        }
+    }
+
+    // rojo builds XML places as `.rbxlx`; everything else is the binary form.
+    let content_type = match place_file.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("rbxlx") => "application/xml",
+        _ => "application/octet-stream",
+    };
+    crate::report::note_to_stderr(&format!(
+        "uploading {} as a new place version",
+        display_rel(place_file, root)
+    ));
+    let version = session.upload_place(bytes, content_type, deadline)?;
+    crate::report::note_to_stderr(&format!(
+        "saved place version {version} — tasks pinned to it"
+    ));
+
+    stamps.targets.insert(key, UploadStamp { hash, version });
+    let write = std::fs::create_dir_all(root.join(".lest")).and_then(|()| {
+        // Unwrap is safe: UploadStamps is a string-keyed map of plain fields.
+        std::fs::write(&stamp_path, serde_json::to_string_pretty(&stamps).unwrap())
+    });
+    if let Err(e) = write {
+        // The upload itself succeeded; failing the run over bookkeeping would
+        // be backwards. But a silently unwritten stamp re-uploads every run,
+        // which reads as "the skip is broken" — so say why.
+        crate::report::warn_to_stderr(&format!(
+            "cannot record the uploaded place version in {}: {e} — the next run will upload again",
+            stamp_path.display()
+        ));
+    }
+    Ok(version)
 }
 
 /// Rewrites every bundle coordinate in a failure's text fields to the disk
@@ -339,6 +454,7 @@ mod tests {
             workers: 0,
             name_filter: None,
             coverage: false,
+            rojo_project: None,
         }
     }
 
@@ -369,7 +485,7 @@ mod tests {
                     passes += 1;
                 }
             };
-            run_with_transport(&plan, &transport, "key", "1", "2", &mut sink).unwrap();
+            run_with_transport(&plan, &transport, "key", "1", "2", None, &mut sink).unwrap();
         }
         assert_eq!(passes, 1);
         // Every event was attributed to the spec file.
@@ -393,7 +509,8 @@ mod tests {
             seen: RefCell::new(0),
         };
         let mut sink = |_: Option<&Path>, _: &Event| {};
-        let err = run_with_transport(&plan, &transport, "key", "1", "2", &mut sink).unwrap_err();
+        let err =
+            run_with_transport(&plan, &transport, "key", "1", "2", None, &mut sink).unwrap_err();
         assert!(err.to_string().contains("no test outcomes"), "{err}");
     }
 
@@ -433,6 +550,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1,
+            place: None,
         };
         let built = bundle::bundle(&input).unwrap();
         let spec_key = crate::resolve::normalize(&spec);
@@ -470,7 +588,7 @@ mod tests {
                     failures.push((message.clone(), trace.clone()));
                 }
             };
-            run_with_transport(&plan, &transport, "key", "1", "2", &mut sink).unwrap();
+            run_with_transport(&plan, &transport, "key", "1", "2", None, &mut sink).unwrap();
         }
         assert_eq!(failures.len(), 1);
         let (message, trace) = &failures[0];
@@ -482,6 +600,161 @@ mod tests {
         );
         // Line 1 is the prelude comment — scaffolding, left as it arrived.
         assert!(trace.contains("TaskScript:1 "), "{trace}");
+    }
+
+    /// Routes by URL instead of a canned sequence: uploads (the universes/v1
+    /// family) return a version number, task posts return QUEUED, polls return
+    /// COMPLETE with one passing outcome. JSON bodies are kept so a test can
+    /// inspect the submitted script.
+    struct RoutedCloud {
+        seen: RefCell<Vec<(Method, String)>>,
+        bodies: RefCell<Vec<String>>,
+    }
+
+    impl Transport for RoutedCloud {
+        fn send(&self, request: HttpRequest, _key: &str) -> Result<HttpResponse, ToolError> {
+            self.seen
+                .borrow_mut()
+                .push((request.method, request.url.clone()));
+            if let Some(api::RequestBody::Json(body)) = &request.body {
+                self.bodies.borrow_mut().push(body.clone());
+            }
+            let body = if request.url.contains("/universes/v1/") {
+                r#"{"versionNumber":41}"#.to_string()
+            } else {
+                match request.method {
+                    Method::Post => {
+                        r#"{"path":"universes/1/places/2/tasks/abc","state":"QUEUED"}"#.to_string()
+                    }
+                    Method::Get => r#"{"path":"universes/1/places/2/tasks/abc","state":"COMPLETE",
+                        "output":{"results":[[
+                            {"kind":"run_start","specCount":1,"protocolVersion":1},
+                            {"kind":"test_pass","path":["m"],"name":"t","durationMs":0.1},
+                            {"kind":"run_end","passed":1,"failed":0,"skipped":0}]]}}"#
+                        .to_string(),
+                }
+            };
+            Ok(HttpResponse::new(200, body))
+        }
+    }
+
+    impl RoutedCloud {
+        fn new() -> Self {
+            RoutedCloud {
+                seen: RefCell::new(Vec::new()),
+                bodies: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn upload_count(&self) -> usize {
+            self.seen
+                .borrow()
+                .iter()
+                .filter(|(_, url)| url.contains("/universes/v1/"))
+                .count()
+        }
+
+        fn first_task_submit(&self) -> String {
+            self.seen
+                .borrow()
+                .iter()
+                .find(|(method, url)| *method == Method::Post && !url.contains("/universes/v1/"))
+                .map(|(_, url)| url.clone())
+                .expect("a task must have been submitted")
+        }
+    }
+
+    /// The stale-place footgun, end to end: the first run uploads and pins,
+    /// an unchanged file skips the upload but still pins the stamped version,
+    /// and edited content uploads again.
+    #[test]
+    fn place_file_uploads_once_skips_unchanged_and_pins_tasks() {
+        let repo = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let spec = root.join("engine.spec.luau");
+        std::fs::write(&spec, "--!strict\nreturn nil\n").unwrap();
+        let place = root.join("test-place.rbxl");
+        std::fs::write(&place, b"binary place v1").unwrap();
+        let plan = SuitePlan {
+            name: "engine".to_string(),
+            specs: vec![spec],
+            root: root.clone(),
+            core_entry: crate::resolve::normalize(&repo.join("luau/core/init.luau")),
+            timeout: Duration::from_secs(5),
+            workers: 0,
+            name_filter: None,
+            coverage: false,
+            rojo_project: None,
+        };
+        let mut sink = |_: Option<&Path>, _: &Event| {};
+
+        let first = RoutedCloud::new();
+        run_with_transport(&plan, &first, "key", "1", "2", Some(&place), &mut sink).unwrap();
+        assert_eq!(first.upload_count(), 1);
+        assert!(
+            first
+                .first_task_submit()
+                .contains("/places/2/versions/41/luau-execution-session-tasks"),
+            "{}",
+            first.first_task_submit()
+        );
+        assert!(root.join(".lest/place-versions.json").is_file());
+
+        // Same bytes: the stamp short-circuits the upload, the pin remains.
+        let second = RoutedCloud::new();
+        run_with_transport(&plan, &second, "key", "1", "2", Some(&place), &mut sink).unwrap();
+        assert_eq!(second.upload_count(), 0);
+        assert!(second
+            .first_task_submit()
+            .contains("/places/2/versions/41/"));
+
+        // Edited bytes: the hash misses and the upload happens again.
+        std::fs::write(&place, b"binary place v2").unwrap();
+        let third = RoutedCloud::new();
+        run_with_transport(&plan, &third, "key", "1", "2", Some(&place), &mut sink).unwrap();
+        assert_eq!(third.upload_count(), 1);
+    }
+
+    /// `settings.rojo` travels config → plan → bundler: the script actually
+    /// submitted to Open Cloud carries the delegation for a mapped require.
+    #[test]
+    fn rojo_project_in_the_plan_reaches_the_bundler() {
+        let repo = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("fixtures")).unwrap();
+        std::fs::write(
+            root.join("engine.spec.luau"),
+            "--!strict\nlocal R = require('./fixtures/recorder')\nreturn nil\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("fixtures/recorder.luau"), "return {}\n").unwrap();
+        std::fs::write(
+            root.join("default.project.json"),
+            r#"{"name":"t","tree":{"$className":"DataModel",
+                "ServerStorage":{"ChiefTests":{"$path":"fixtures"}}}}"#,
+        )
+        .unwrap();
+        let plan = SuitePlan {
+            name: "engine".to_string(),
+            specs: vec![root.join("engine.spec.luau")],
+            root: root.clone(),
+            core_entry: crate::resolve::normalize(&repo.join("luau/core/init.luau")),
+            timeout: Duration::from_secs(5),
+            workers: 0,
+            name_filter: None,
+            coverage: false,
+            rojo_project: Some(root.join("default.project.json")),
+        };
+        let transport = RoutedCloud::new();
+        let mut sink = |_: Option<&Path>, _: &Event| {};
+        run_with_transport(&plan, &transport, "key", "1", "2", None, &mut sink).unwrap();
+        let submitted = transport.bodies.borrow().join("\n");
+        assert!(
+            submitted.contains("'ServerStorage', 'ChiefTests', 'recorder'"),
+            "the delegation table must reach the submitted script"
+        );
     }
 
     /// The warning carries what the eventual in-engine error cannot: the

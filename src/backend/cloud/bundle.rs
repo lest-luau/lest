@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 
 use crate::resolve::{
     normalize, scan_requires, scan_requires_spanned, ResolveError, Resolved, Resolver,
+    VirtualDataModel,
 };
 
 use crate::error::ToolError;
@@ -136,6 +137,36 @@ pub struct BundleInput<'a> {
     pub name_filter: Option<&'a str>,
     /// Per-spec scheduler deadline inside the engine, in milliseconds.
     pub deadline_ms: u64,
+    /// The rojo project mapping (`settings.rojo`), when configured. A string
+    /// require whose target it maps to a place ModuleScript is *delegated*:
+    /// the generated require resolves the live instance and hands it to the
+    /// engine's `require`, so the spec and in-place code share one module
+    /// through the engine's own cache — instead of the spec receiving a
+    /// silently bundled private copy with its own state.
+    pub place: Option<&'a VirtualDataModel>,
+}
+
+/// The DataModel path a require target delegates to, when the project file
+/// maps it to a ModuleScript in the place.
+///
+/// Two exclusions guard correctness. Files under lest/core's own directory
+/// never delegate: the framework must be the copy this CLI bundled, or a
+/// stale place would run the suite against a second, older lest/core — the
+/// version skew embedding the framework exists to make impossible. And
+/// non-ModuleScript classes (a mapped `Script`, `LocalScript`, or folder)
+/// keep bundling like any unmapped file, because the engine's `require`
+/// rejects them.
+fn place_delegation<'a>(
+    place: Option<&'a VirtualDataModel>,
+    core_dir: Option<&Path>,
+    target: &Path,
+) -> Option<&'a [String]> {
+    let place = place?;
+    if core_dir.is_some_and(|dir| target.starts_with(dir)) {
+        return None;
+    }
+    let node = place.node_for_file(target)?;
+    (node.is_module() && node.class_name == "ModuleScript").then_some(node.path.as_slice())
 }
 
 /// Module sources read off disk, reusable across the bundles of one suite.
@@ -193,6 +224,10 @@ pub fn bundle_with_cache(
     cache: &mut SourceCache,
 ) -> Result<Bundle, ToolError> {
     let core = normalize(input.core_entry);
+    // The delegation guard for the framework's own files (see
+    // `place_delegation`); `core` is normalized, so the prefix test compares
+    // like with like.
+    let core_dir = core.parent().map(Path::to_path_buf);
     let resolver = Resolver::new();
 
     // Roots whose transitive closure we inline from the project: lest/core and
@@ -221,6 +256,15 @@ pub fn bundle_with_cache(
         let requires = scan_requires(cache.read(&file)?);
         for spec in requires {
             if let Ok(Resolved::File(path)) = resolver.resolve(&file, &spec) {
+                // A target the place provides is not walked: neither it nor
+                // its dependencies are bundled — the whole subtree loads
+                // in-engine, through the engine's require and cache. (Roots
+                // are pushed above this loop, so a *spec* the project maps
+                // still bundles, and its emitted `__map` entry wins over
+                // delegation.)
+                if place_delegation(input.place, core_dir.as_deref(), &path).is_some() {
+                    continue;
+                }
                 if !closure.contains(&path) {
                     queue.push(path);
                 }
@@ -250,13 +294,18 @@ pub fn bundle_with_cache(
 
     let mut unresolved = Vec::new();
     let mut source_map = SourceMap::default();
+    let context = EmitContext {
+        id_of: &id_of,
+        resolver: &resolver,
+        place: input.place,
+        core_dir: core_dir.as_deref(),
+    };
     for path in &modules {
         emit_module(
             &mut out,
             path,
-            &id_of,
+            &context,
             cache,
-            &resolver,
             &mut unresolved,
             &mut source_map,
         )?;
@@ -390,39 +439,58 @@ fn embedded_id_for(arg: &str) -> Option<&'static str> {
     EMBEDDED.iter().find(|m| m.name == base).map(|m| m.id)
 }
 
+/// The per-bundle lookups every module factory is emitted against.
+struct EmitContext<'a> {
+    id_of: &'a BTreeMap<PathBuf, String>,
+    resolver: &'a Resolver,
+    place: Option<&'a VirtualDataModel>,
+    /// lest/core's directory, exempt from delegation (see [`place_delegation`]).
+    core_dir: Option<&'a Path>,
+}
+
 /// Emits a factory for a project module (lest/core, a spec, or a dependency),
 /// taking its source from `cache` — always a hit, since the closure walk read
 /// every module through the same cache — and resolving its requires against
-/// the on-disk closure. Requires that fail to resolve are reported into
-/// `unresolved` with their call-site line, since the alternative report is the
-/// shim's runtime error at a bundle coordinate.
+/// the on-disk closure. A require the closure bundled maps to a module id; a
+/// require the project file maps into the place delegates to the engine; one
+/// that fails to resolve is reported into `unresolved` with its call-site
+/// line, since the alternative report is the shim's runtime error at a bundle
+/// coordinate.
 fn emit_module(
     out: &mut String,
     path: &Path,
-    id_of: &BTreeMap<PathBuf, String>,
+    context: &EmitContext,
     cache: &mut SourceCache,
-    resolver: &Resolver,
     unresolved: &mut Vec<UnresolvedRequire>,
     source_map: &mut SourceMap,
 ) -> Result<(), ToolError> {
-    let id = id_of
+    let id = context
+        .id_of
         .get(&normalize(path))
         .expect("every module has an id")
         .clone();
     let source = cache.read(path)?;
 
-    // Build the arg→id map from this module's own requires, resolved relative
-    // to it. Unresolvable requires and builtins are omitted; the injected
-    // `require` errors clearly if the module reaches for one at run time.
+    // Build the arg→id and arg→instance-path maps from this module's own
+    // requires, resolved relative to it. The bundled set is consulted first:
+    // a module that is *both* emitted (a root the project happens to map) and
+    // mapped must load its bundled copy, or the entrypoint and the place
+    // would each run their own.
     let mut mappings: BTreeMap<String, String> = BTreeMap::new();
+    let mut place_mappings: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for found in scan_requires_spanned(source) {
-        if mappings.contains_key(&found.spec) {
+        if mappings.contains_key(&found.spec) || place_mappings.contains_key(&found.spec) {
             continue;
         }
-        match resolver.resolve(path, &found.spec) {
+        match context.resolver.resolve(path, &found.spec) {
             Ok(Resolved::File(target)) => {
-                if let Some(target_id) = id_of.get(&normalize(&target)) {
+                let target = normalize(&target);
+                if let Some(target_id) = context.id_of.get(&target) {
                     mappings.insert(found.spec, target_id.clone());
+                } else if let Some(instance_path) =
+                    place_delegation(context.place, context.core_dir, &target)
+                {
+                    place_mappings.insert(found.spec, instance_path.to_vec());
                 }
             }
             // Builtins (`@lune/*`, `@lute/*`) are deliberate in modules shared
@@ -439,7 +507,8 @@ fn emit_module(
         }
     }
     let label = path.display().to_string();
-    let (start_line, line_count) = write_module_factory(out, &label, &id, source, &mappings);
+    let (start_line, line_count) =
+        write_module_factory(out, &label, &id, source, &mappings, &place_mappings);
     source_map.push(SourceSpan {
         file: Some(path.to_path_buf()),
         label,
@@ -466,7 +535,8 @@ fn emit_embedded(out: &mut String, module: &EmbeddedModule, source_map: &mut Sou
         }
     }
     let label = format!("embedded lest/roblox: {}", module.name);
-    let (start_line, line_count) = write_module_factory(out, &label, module.id, source, &mappings);
+    let (start_line, line_count) =
+        write_module_factory(out, &label, module.id, source, &mappings, &BTreeMap::new());
     source_map.push(SourceSpan {
         file: None,
         label,
@@ -487,6 +557,7 @@ fn write_module_factory(
     id: &str,
     source: &str,
     mappings: &BTreeMap<String, String>,
+    place_mappings: &BTreeMap<String, Vec<String>>,
 ) -> (usize, usize) {
     // The label goes through the same escaping as every other interpolation in
     // this file. It is only a comment, but it is built from a filesystem path,
@@ -506,6 +577,24 @@ fn write_module_factory(
         out.push_str(&format!("['{}'] = '{target_id}'", luau_escape(arg)));
     }
     out.push_str("}\n");
+    // Rojo-mapped requires: arg → the DataModel path of the place instance to
+    // delegate to. Emitted even when empty so every factory has the same
+    // scaffolding shape.
+    out.push_str("\tlocal __place = {");
+    let mut first = true;
+    for (arg, segments) in place_mappings {
+        if !first {
+            out.push_str(", ");
+        }
+        first = false;
+        let path = segments
+            .iter()
+            .map(|segment| format!("'{}'", luau_escape(segment)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("['{}'] = {{{path}}}", luau_escape(arg)));
+    }
+    out.push_str("}\n");
     // The shim owns *string* requires only — those were resolvable at bundle
     // time or they are a loud error, guarding the class of bug where a miss
     // would silently load the wrong thing. The error names the requiring
@@ -521,6 +610,10 @@ fn write_module_factory(
          \t\tlocal id = __map[spec]\n\
          \t\tif id ~= nil then\n\
          \t\t\treturn __lest_require(id)\n\
+         \t\tend\n\
+         \t\tlocal place = __place[spec]\n\
+         \t\tif place ~= nil then\n\
+         \t\t\treturn __lest_native_require(__lest_place_instance(place, spec))\n\
          \t\tend\n\
          \t\tif type(spec) ~= 'string' then\n\
          \t\t\treturn __lest_native_require(spec)\n\
@@ -568,6 +661,29 @@ const PRELUDE: &str = r#"-- Generated by lest — self-contained cloud bundle. D
 -- cache owns identity — a place fixture and a spec requiring the same
 -- ModuleScript must get the same table.
 local __lest_native_require = require
+
+-- Resolves a rojo-mapped require to the live instance the project file
+-- promised, walking from the segment's service down. A hole in the walk means
+-- the uploaded place does not match the project file — a stale place, named
+-- precisely here rather than left to a nil index somewhere downstream. Level 0
+-- on purpose: the message is self-contained, and the alternative position is a
+-- bundle coordinate in scaffolding no source map covers.
+local function __lest_place_instance (segments, spec)
+	local node = game:GetService(segments[1])
+	for i = 2, #segments do
+		local child = node:FindFirstChild(segments[i])
+		if child == nil then
+			error(
+				'lest cloud bundle: require(' .. tostring(spec) .. ') maps to '
+					.. table.concat(segments, '.') .. ' in the rojo project, but nothing exists at '
+					.. table.concat(segments, '.', 1, i) .. ' — is the uploaded place current?',
+				0
+			)
+		end
+		node = child
+	end
+	return node
+end
 
 local __lest_modules = {}
 local __lest_cache = {}
@@ -638,6 +754,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 30000,
+            place: None,
         };
         let bundle = bundle(&input).expect("bundle should succeed");
         // Every require in lest's own core and specs resolves — a warning here
@@ -691,6 +808,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 30000,
+            place: None,
         };
         let script = bundle(&input).unwrap().script;
 
@@ -730,6 +848,7 @@ mod tests {
             "t0",
             "local dynamicRequire = require\n\
              return { attempt = function (target) return dynamicRequire(target) end }\n",
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         script.push_str("return __lest_require('t0')\n");
@@ -783,6 +902,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1000,
+            place: None,
         };
         let bundle = bundle(&input).expect("a dynamic instance require must not block bundling");
         assert!(
@@ -792,6 +912,165 @@ mod tests {
         // Invisible to the static scan means unwarned too — a dynamic
         // instance require is the supported pattern, not a miss.
         assert_eq!(bundle.unresolved, vec![]);
+    }
+
+    /// The headline of the rojo-mapping milestone: a string require of a
+    /// module the project file maps into the place delegates to the engine —
+    /// and neither the module nor its dependencies are bundled, because the
+    /// place provides that whole subtree.
+    #[test]
+    fn mapped_requires_delegate_to_the_place_and_are_not_bundled() {
+        let root = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("fixtures")).unwrap();
+        std::fs::write(
+            dir.path().join("spec.spec.luau"),
+            "--!strict\nlocal Recorder = require('./fixtures/recorder')\nreturn nil\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("fixtures/recorder.luau"),
+            "--!strict\nlocal Dep = require('./dep')\nreturn { marker = 'RECORDER_BODY', dep = Dep }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("fixtures/dep.luau"),
+            "return { marker = 'DEP_BODY' }\n",
+        )
+        .unwrap();
+        let place = VirtualDataModel::from_json(
+            dir.path(),
+            r#"{"name":"t","tree":{"$className":"DataModel",
+                "ServerStorage":{"ChiefTests":{"$path":"fixtures"}}}}"#,
+        )
+        .unwrap();
+
+        let specs = vec![SpecEntry {
+            name: "spec.spec".to_string(),
+            path: dir.path().join("spec.spec.luau"),
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1000,
+            place: Some(&place),
+        };
+        let bundle = bundle(&input).unwrap();
+
+        assert!(
+            bundle
+                .script
+                .contains("['./fixtures/recorder'] = {'ServerStorage', 'ChiefTests', 'recorder'}"),
+            "the spec's require must delegate by DataModel path"
+        );
+        // The place provides the module and everything below it.
+        assert!(!bundle.script.contains("RECORDER_BODY"));
+        assert!(!bundle.script.contains("DEP_BODY"));
+        // A delegated require is not an unresolved one.
+        assert_eq!(bundle.unresolved, vec![]);
+    }
+
+    /// A project file that maps lest/core itself (a repo-root `$path` will)
+    /// must not delegate the framework: the suite has to run against the copy
+    /// this CLI bundled, or a stale place supplies a second, older lest/core.
+    #[test]
+    fn core_never_delegates_even_when_mapped() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        // Map the framework's own directory into the place.
+        let place = VirtualDataModel::from_json(
+            &root,
+            r#"{"name":"t","tree":{"$className":"DataModel",
+                "ServerStorage":{"core":{"$path":"luau/core"}}}}"#,
+        )
+        .unwrap();
+        let specs = vec![SpecEntry {
+            name: "expect.spec".to_string(),
+            path: spec,
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1000,
+            place: Some(&place),
+        };
+        let bundle = bundle(&input).unwrap();
+        // Core still inlines in full…
+        assert!(bundle.script.contains("expect.luau"));
+        // …and no require anywhere delegated (every `__place` stays empty).
+        assert!(
+            !bundle.script.contains("__place = {["),
+            "a delegated framework module would run the place's copy"
+        );
+    }
+
+    /// Executes the generated delegation in an embedded VM: pure-Luau stubs
+    /// stand in for `game` and the engine's `require`, proving the emitted
+    /// walk finds the instance — and names the exact missing segment when the
+    /// place is stale.
+    #[test]
+    fn generated_place_delegation_walks_instances_at_runtime() {
+        use mlua::{Lua, Table};
+
+        let mut script = String::new();
+        script.push_str(PRELUDE);
+        let mut place_mappings = BTreeMap::new();
+        place_mappings.insert(
+            "./fixtures/recorder".to_string(),
+            vec![
+                "ServerStorage".to_string(),
+                "ChiefTests".to_string(),
+                "recorder".to_string(),
+            ],
+        );
+        write_module_factory(
+            &mut script,
+            "synthetic",
+            "t0",
+            "return { load = function () return require('./fixtures/recorder') end }\n",
+            &BTreeMap::new(),
+            &place_mappings,
+        );
+        script.push_str("return __lest_require('t0')\n");
+
+        let stubs = |with_recorder: bool| {
+            format!(
+                "local function node (name, children)\n\
+                 \treturn {{ Name = name, FindFirstChild = function (self, child) return children[child] end }}\n\
+                 end\n\
+                 local chief = node('ChiefTests', {{}})\n\
+                 if {with_recorder} then\n\
+                 \tchief = node('ChiefTests', {{ recorder = node('recorder', {{}}) }})\n\
+                 end\n\
+                 local storage = node('ServerStorage', {{ ChiefTests = chief }})\n\
+                 game = {{ GetService = function (self, name) return storage end }}\n\
+                 require = function (instance) return 'native:' .. instance.Name end\n",
+            )
+        };
+
+        // The instance exists: the walk reaches it and the engine's require
+        // receives the Instance itself.
+        let lua = Lua::new();
+        lua.load(stubs(true)).exec().unwrap();
+        let module: Table = lua.load(&script).eval().expect("bundle chunk must load");
+        let load: mlua::Function = module.get("load").unwrap();
+        let delegated: String = load.call(()).unwrap();
+        assert_eq!(delegated, "native:recorder");
+
+        // The instance is missing: a precise stale-place error, not a nil
+        // index downstream.
+        let lua = Lua::new();
+        lua.load(stubs(false)).exec().unwrap();
+        let module: Table = lua.load(&script).eval().expect("bundle chunk must load");
+        let load: mlua::Function = module.get("load").unwrap();
+        let err = load.call::<mlua::Value>(()).unwrap_err().to_string();
+        assert!(
+            err.contains("nothing exists at ServerStorage.ChiefTests.recorder"),
+            "{err}"
+        );
+        assert!(err.contains("is the uploaded place current?"), "{err}");
     }
 
     /// The source map's core invariant, verified against the emitted script
@@ -811,6 +1090,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1000,
+            place: None,
         };
         let bundle = bundle(&input).unwrap();
 
@@ -855,6 +1135,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1000,
+            place: None,
         };
         let map = bundle(&input).unwrap().source_map;
 
@@ -901,6 +1182,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1000,
+            place: None,
         };
         let bundle = bundle(&input).expect("unresolvable requires must not block bundling");
 
@@ -933,6 +1215,7 @@ mod tests {
             specs: &specs,
             name_filter: Some("adds numbers"),
             deadline_ms: 5000,
+            place: None,
         };
         let script = bundle(&input).unwrap().script;
         assert!(script.contains("nameFilter = 'adds numbers'"));
