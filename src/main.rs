@@ -769,6 +769,7 @@ pub fn run_suites_with(
             workers: config.workers,
             name_filter: params.name_filter.map(str::to_string),
             coverage: params.coverage && suite.backend == BackendKind::Native,
+            rojo_project: config.rojo.as_ref().map(|project| root.join(project)),
         };
 
         let mut suite_totals = Totals::default();

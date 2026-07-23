@@ -103,6 +103,19 @@ fn run_with_transport<T: Transport>(
         session.pin_place_version(version);
     }
 
+    // `settings.rojo`, consumed: string requires whose targets the project
+    // file maps into the place delegate to the engine's require instead of
+    // silently bundling a private copy. Parsed once per suite; a missing or
+    // malformed project file is a tool error, not a silent fall-back to
+    // bundling — a config that names a project expects it honored.
+    let place_map = match &plan.rojo_project {
+        Some(project) => Some(
+            crate::resolve::VirtualDataModel::from_project_file(project)
+                .map_err(|e| ToolError(e.to_string()))?,
+        ),
+        None => None,
+    };
+
     let mut outcomes = 0usize;
     // One task per spec file means lest/core is emitted into every bundle;
     // sharing the cache keeps that from re-reading the framework off disk once
@@ -123,6 +136,7 @@ fn run_with_transport<T: Transport>(
             specs: &specs,
             name_filter: plan.name_filter.as_deref(),
             deadline_ms,
+            place: place_map.as_ref(),
         };
         let bundle::Bundle {
             script,
@@ -440,6 +454,7 @@ mod tests {
             workers: 0,
             name_filter: None,
             coverage: false,
+            rojo_project: None,
         }
     }
 
@@ -535,6 +550,7 @@ mod tests {
             specs: &specs,
             name_filter: None,
             deadline_ms: 1,
+            place: None,
         };
         let built = bundle::bundle(&input).unwrap();
         let spec_key = crate::resolve::normalize(&spec);
@@ -588,9 +604,11 @@ mod tests {
 
     /// Routes by URL instead of a canned sequence: uploads (the universes/v1
     /// family) return a version number, task posts return QUEUED, polls return
-    /// COMPLETE with one passing outcome.
+    /// COMPLETE with one passing outcome. JSON bodies are kept so a test can
+    /// inspect the submitted script.
     struct RoutedCloud {
         seen: RefCell<Vec<(Method, String)>>,
+        bodies: RefCell<Vec<String>>,
     }
 
     impl Transport for RoutedCloud {
@@ -598,6 +616,9 @@ mod tests {
             self.seen
                 .borrow_mut()
                 .push((request.method, request.url.clone()));
+            if let Some(api::RequestBody::Json(body)) = &request.body {
+                self.bodies.borrow_mut().push(body.clone());
+            }
             let body = if request.url.contains("/universes/v1/") {
                 r#"{"versionNumber":41}"#.to_string()
             } else {
@@ -621,6 +642,7 @@ mod tests {
         fn new() -> Self {
             RoutedCloud {
                 seen: RefCell::new(Vec::new()),
+                bodies: RefCell::new(Vec::new()),
             }
         }
 
@@ -663,6 +685,7 @@ mod tests {
             workers: 0,
             name_filter: None,
             coverage: false,
+            rojo_project: None,
         };
         let mut sink = |_: Option<&Path>, _: &Event| {};
 
@@ -691,6 +714,47 @@ mod tests {
         let third = RoutedCloud::new();
         run_with_transport(&plan, &third, "key", "1", "2", Some(&place), &mut sink).unwrap();
         assert_eq!(third.upload_count(), 1);
+    }
+
+    /// `settings.rojo` travels config → plan → bundler: the script actually
+    /// submitted to Open Cloud carries the delegation for a mapped require.
+    #[test]
+    fn rojo_project_in_the_plan_reaches_the_bundler() {
+        let repo = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("fixtures")).unwrap();
+        std::fs::write(
+            root.join("engine.spec.luau"),
+            "--!strict\nlocal R = require('./fixtures/recorder')\nreturn nil\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("fixtures/recorder.luau"), "return {}\n").unwrap();
+        std::fs::write(
+            root.join("default.project.json"),
+            r#"{"name":"t","tree":{"$className":"DataModel",
+                "ServerStorage":{"ChiefTests":{"$path":"fixtures"}}}}"#,
+        )
+        .unwrap();
+        let plan = SuitePlan {
+            name: "engine".to_string(),
+            specs: vec![root.join("engine.spec.luau")],
+            root: root.clone(),
+            core_entry: crate::resolve::normalize(&repo.join("luau/core/init.luau")),
+            timeout: Duration::from_secs(5),
+            workers: 0,
+            name_filter: None,
+            coverage: false,
+            rojo_project: Some(root.join("default.project.json")),
+        };
+        let transport = RoutedCloud::new();
+        let mut sink = |_: Option<&Path>, _: &Event| {};
+        run_with_transport(&plan, &transport, "key", "1", "2", None, &mut sink).unwrap();
+        let submitted = transport.bodies.borrow().join("\n");
+        assert!(
+            submitted.contains("'ServerStorage', 'ChiefTests', 'recorder'"),
+            "the delegation table must reach the submitted script"
+        );
     }
 
     /// The warning carries what the eventual in-engine error cannot: the
