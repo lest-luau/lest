@@ -34,7 +34,7 @@ lest
 ├── luau/             Luau only — everything lest ships inside the binary
 │   ├── core/         the framework: spec API, matchers, hooks, emitter
 │   └── runtime/      in-runtime plumbing: the harness template, cloud collector
-├── tests/            every Luau spec, one root, one directory per backend
+├── tests/            every Luau spec, one root, one directory per suite
 ├── docs/             this documentation
 └── lest.toml         lest testing lest
 ```
