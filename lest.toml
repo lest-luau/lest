@@ -10,6 +10,12 @@ include = ["tests/core/**/*.spec.luau"]
 [suites.coverage]
 include = ["tests/coverage/**/*.spec.luau"]
 
+# End-to-end snapshot specs: real `toMatchSnapshot` calls compared against the
+# committed __snapshots__ file, exercising the CLI-side store rather than the
+# framework's event emission (tests/core covers that half).
+[suites.snapshot]
+include = ["tests/snapshot/**/*.spec.luau"]
+
 # Specs that need real runtime APIs run inside spawned runtime processes —
 # one harness seam, two runtimes.
 [suites.lune-runtime]
