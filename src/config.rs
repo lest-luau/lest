@@ -97,11 +97,12 @@ struct RawSuite {
 struct RawSettings {
     timeout_ms: Option<u64>,
     workers: Option<usize>,
-    // Parsed and validated but not yet read: the cloud backend has shipped
+    // Parsed and validated but not yet consumed: the cloud backend has shipped
     // without needing it (it bundles the specs rather than building a place),
     // so `rojo` waits on the rojo build/publish path that replaces the bundle.
-    // Accepted now so configs written for it are not rejected in the meantime.
-    #[allow(dead_code)]
+    // Accepted so configs written for it are not rejected in the meantime —
+    // and named back to the reader by `config_warnings`, so acceptance never
+    // reads as support.
     rojo: Option<String>,
     core: Option<String>,
 }
@@ -195,12 +196,8 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
                 .map_err(|e| ToolError(format!("cannot read {}: {e}", path.display())))?;
             let raw: RawConfig = toml::from_str(&text)
                 .map_err(|e| ToolError(format!("cannot parse {}:\n{e}", path.display())))?;
-            // Serde drops what it does not recognize, which is the tolerance we
-            // want — but silently, which is not: `bakcend = "lune"` runs every
-            // spec on native and `deafult = false` leaves a cloud suite enabled,
-            // both looking exactly like a working config. Name them and carry on.
-            let unknown = unknown_keys(&text);
-            if !unknown.is_empty() {
+            let warnings = config_warnings(&text, &raw, &path);
+            if !warnings.is_empty() {
                 // Warnings belong on stderr in the one diagnostic voice. This
                 // runs before the CLI has computed its color flags, so the
                 // decision is made here by the same rule `main` uses: an argv
@@ -211,10 +208,9 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
                     .any(|a| a == "--no-color")
                     || std::env::var_os("NO_COLOR").is_some();
                 let color = !no_color && std::io::stderr().is_terminal();
-                eprint!(
-                    "{}",
-                    crate::report::render_warning(&unknown_keys_message(&unknown, &path), color)
-                );
+                for warning in &warnings {
+                    eprint!("{}", crate::report::render_warning(warning, color));
+                }
             }
             let root = path.parent().unwrap_or(cwd).to_path_buf();
             (raw, root, Some(path))
@@ -225,6 +221,33 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
     let mut config = resolve_raw(raw)?;
     config.file = file;
     Ok((config, root))
+}
+
+/// The `settings.rojo` warning body. The key is parsed and validated so a
+/// config written ahead of the rojo build/publish milestone is not rejected —
+/// but a key that is accepted and silently ignored looks exactly like a
+/// working feature (a field report probed cloud path mapping for a run before
+/// concluding it did not exist), so its presence is named on every load until
+/// it is consumed.
+const ROJO_UNCONSUMED: &str = "the settings.rojo key is not consumed yet — cloud suites bundle \
+    string requires from disk rather than mapping them through the project file";
+
+/// Every warning a parsed config earns. Serde drops what it does not
+/// recognize, which is the tolerance we want — but silently, which is not:
+/// `bakcend = "lune"` runs every spec on native and `deafult = false` leaves a
+/// cloud suite enabled, both looking exactly like a working config. The same
+/// goes for a known key that nothing consumes yet. Split from [`load`] so the
+/// triggers and wording are testable without capturing stderr.
+fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let unknown = unknown_keys(text);
+    if !unknown.is_empty() {
+        warnings.push(unknown_keys_message(&unknown, path));
+    }
+    if raw.settings.rojo.is_some() {
+        warnings.push(ROJO_UNCONSUMED.to_string());
+    }
+    warnings
 }
 
 /// The unknown-key warning body — a lowercase fragment, capitalized by the
@@ -475,6 +498,23 @@ mod tests {
         assert_eq!(config.workers, 4);
         assert_eq!(config.coverage.min, Some(80.0));
         assert_eq!(config.coverage.exclude, vec!["Packages/**"]);
+    }
+
+    /// `settings.rojo` is accepted for forward compatibility but consumed by
+    /// nothing — silence would let it read as a working feature.
+    #[test]
+    fn a_set_rojo_key_is_warned_about_until_consumed() {
+        let text = "[settings]\nrojo = \"default.project.json\"\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
+        assert_eq!(warnings, vec![ROJO_UNCONSUMED.to_string()]);
+    }
+
+    #[test]
+    fn an_unset_rojo_key_earns_no_warning() {
+        let text = "[suites.unit]\ninclude = [\"src/**\"]\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        assert!(config_warnings(text, &raw, Path::new("lest.toml")).is_empty());
     }
 
     /// A typo'd key parses fine and does nothing, which is the failure mode
