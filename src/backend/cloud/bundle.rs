@@ -367,12 +367,15 @@ fn write_module_factory(
     out.push_str("}\n");
     // The shim owns *string* requires only — those were resolvable at bundle
     // time or they are a loud error, guarding the class of bug where a miss
-    // would silently load the wrong thing. A non-string argument (a
+    // would silently load the wrong thing. The error names the requiring
+    // module: the argument value alone makes two call sites requiring the
+    // same bad string print identically, and the error's own position is a
+    // bundle coordinate no reader can use. A non-string argument (a
     // ModuleScript Instance, a legacy asset id) is delegated to the engine's
     // captured `require` and never enters `__lest_cache`: the native module
     // cache must own place-module identity, or a spec and an in-place fixture
     // requiring the same ModuleScript would see two copies.
-    out.push_str(
+    out.push_str(&format!(
         "\tlocal function require (spec)\n\
          \t\tlocal id = __map[spec]\n\
          \t\tif id ~= nil then\n\
@@ -381,9 +384,10 @@ fn write_module_factory(
          \t\tif type(spec) ~= 'string' then\n\
          \t\t\treturn __lest_native_require(spec)\n\
          \t\tend\n\
-         \t\terror('lest cloud bundle: unresolved require(' .. spec .. '); string requires must resolve at bundle time, instance requires are delegated to the engine', 2)\n\
+         \t\terror('lest cloud bundle: unresolved require(' .. spec .. ') in {label}; string requires must resolve at bundle time, instance requires are delegated to the engine', 2)\n\
          \tend\n",
-    );
+        label = luau_escape(label)
+    ));
     // The module body is inlined verbatim; its top-level `return` becomes the
     // factory's return value.
     out.push_str(source);
@@ -589,12 +593,14 @@ mod tests {
         let delegated: String = attempt.call(lua.create_table().unwrap()).unwrap();
         assert_eq!(delegated, "native:table");
 
-        // An unresolved *string* is still a loud bundler error, not a fallback.
+        // An unresolved *string* is still a loud bundler error, not a
+        // fallback — and it names the requiring module, since the argument
+        // value alone makes two call sites print identically.
         let err = attempt.call::<Value>("nope").unwrap_err();
         let message = err.to_string();
         assert!(
-            message.contains("lest cloud bundle: unresolved require(nope)"),
-            "string miss must stay a loud error, got: {message}"
+            message.contains("lest cloud bundle: unresolved require(nope) in synthetic"),
+            "string miss must stay a loud error naming the module, got: {message}"
         );
     }
 
