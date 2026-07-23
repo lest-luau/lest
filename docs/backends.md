@@ -110,6 +110,7 @@ place_id = 9876543210
    `lest.toml` — under `[cloud]`, or per-suite as `[suites.<name>.cloud]`.
 3. **An API key** with the universe-places Luau-execution scope, created at
    [create.roblox.com/dashboard/credentials](https://create.roblox.com/dashboard/credentials).
+   Add the universe-places **write** scope too if you use `place_file` below.
 
 The key **is** secret and is read from the environment only — never from
 `lest.toml`, and never printed:
@@ -139,28 +140,68 @@ Nothing needs to be installed in the project for engine tests: the in-engine
 collector and task scheduler are compiled into the CLI and inlined into the
 bundle.
 
+### Keeping the place current
+
+lest runs against a place, and with `[cloud] place_file` it also *puts one
+there*: name a built `.rbxl`/`.rbxlx` and every cloud run uploads it as a new
+saved version first — skipped when the file's content hash hasn't changed —
+and pins every task to exactly that version. Build with rojo, point lest at
+the output, and the "someone forgot to publish after a fixture change" run
+against a stale place stops being possible:
+
+```toml
+[cloud]
+universe_id = 1234567890
+place_id = 9876543210
+place_file = "test-place.rbxl"     # e.g. from `rojo build -o test-place.rbxl`
+```
+
 ### Requiring place modules
 
 The bundle is self-contained, so an empty place works — but the place doesn't
 have to be empty. If yours is populated (a rojo-built place with fixtures as
-real ModuleScripts, say), a require whose argument is a ModuleScript Instance
-is handed to the engine's own `require`:
+real ModuleScripts, say), there are two ways a spec reaches those modules.
+
+**With `settings.rojo` set** (the good way): point lest at your rojo project
+file, and a plain string require of a mapped module is *delegated* to the
+place. The bundler sees that `../fixtures/recorder` maps to
+`ServerStorage.Fixtures.recorder`, skips bundling it, and the generated
+require resolves the live instance and hands it to the engine's `require`:
+
+```toml
+[settings]
+rojo = "default.project.json"
+```
+
+```luau
+local Recorder = require('../fixtures/recorder')   -- the place's copy, fully typed
+```
+
+Because the file is required by its real path, luau-lsp infers full types from
+the implementation — no `:: typeof(...)` casts — and because the engine's
+cache owns the module, the spec and in-place code share one table.
+
+**Without it**, a require whose argument is a ModuleScript Instance is handed
+to the engine's own `require`:
 
 ```luau
 local fixture = game:GetService('ServerStorage').Fixtures.recorder
 local Recorder = require(fixture)
 ```
 
-Delegated requires go through the engine's native module cache, so a spec and
-in-place code requiring the same ModuleScript get the same table — shared state
-and module identity survive, which no bundled copy of the module could
-guarantee.
+Delegated requires — both kinds — go through the engine's native module cache,
+so a spec and in-place code requiring the same ModuleScript get the same
+table: shared state and module identity survive, which no bundled copy of the
+module could guarantee. Beware the un-mapped middle ground: a string require
+of a module that also lives in the place, *without* `settings.rojo`, bundles a
+private copy with its own state.
 
 Two rules keep the boundary sharp:
 
 - **String requires belong to the bundler.** They must resolve on disk at
-  bundle time, and an unresolved one is a loud error, never a silent fallback.
-  That includes *dynamic* string requires — a variable holding a path can't be
+  bundle time — into the bundle, or through the project file into the place —
+  and an unresolved one is a loud error, never a silent fallback. That
+  includes *dynamic* string requires — a variable holding a path can't be
   resolved from the CLI and isn't supported on this backend.
 - **Everything else belongs to the engine.** Instances (and legacy asset ids)
   pass through untouched, and the engine's own errors surface unchanged.
