@@ -2,7 +2,7 @@
 -- The cloud sanitizer is pure Luau, so the native suite exercises it directly —
 -- no Open Cloud round-trip required (the seam scheduler.luau advertises: the
 -- runtime plumbing stays unit-testable under plain-Luau tooling).
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 local sanitize = require('../../luau/runtime/cloud/sanitize')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect

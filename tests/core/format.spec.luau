@@ -1,6 +1,6 @@
 --!strict
-local Lest = require('../../luau/core')
-local format = require('../../luau/core/format')
+local Lest = require('@lest')
+local format = require('@lest/format')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 

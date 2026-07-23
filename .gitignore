@@ -1,10 +1,11 @@
 # Rust build artifacts.
 /target
 
-# Any . files or folders that are not .gitignore or .github.
+# Any . files or folders that are not .gitignore, .github, or .luaurc.
 /.*
 !/.gitignore
 !/.github/
+!/.luaurc
 
 # Any markdown that is not README.md.
 /*.md

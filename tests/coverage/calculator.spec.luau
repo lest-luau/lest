@@ -1,7 +1,7 @@
 --!strict
 -- Native suite that produces a real coverage report. Run with:
 --   lest run coverage --coverage
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 local Calculator = require('./calculator')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect

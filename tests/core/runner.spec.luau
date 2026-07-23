@@ -2,7 +2,7 @@
 -- Runner/scope-machinery regressions, each exercised in isolation with
 -- `Lest.capture` so an intentional beforeAll failure never leaks into the
 -- aggregate suite.
-local Lest = require('../../luau/core')
+local Lest = require('@lest')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 local beforeAll, beforeEach, afterEach, afterAll = Lest.beforeAll, Lest.beforeEach, Lest.afterEach, Lest.afterAll
