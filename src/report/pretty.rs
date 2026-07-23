@@ -114,8 +114,19 @@ impl<W: Write> Pretty<W> {
     /// text, so it is printed verbatim rather than dimmed.
     pub fn snapshot_failure(&mut self, spec: &str, key: &str, detail: &str) {
         let header = self.paint(DIM, &format!("snapshot \"{key}\" in {spec}:"));
+        let _ = writeln!(self.out, "{header}");
+        // A diff gets a legend — nothing on the `-`/`+` marks says which side
+        // is the file and which is the run. Non-diff details (a duplicate
+        // key's explanation, say) skip it.
+        if detail
+            .lines()
+            .any(|line| line.starts_with("- ") || line.starts_with("+ "))
+        {
+            let legend = self.paint(DIM, "  - stored snapshot  + received");
+            let _ = writeln!(self.out, "{legend}");
+        }
         // `detail` already ends in a newline when it is a rendered diff.
-        let _ = writeln!(self.out, "{header}\n{}", detail.trim_end_matches('\n'));
+        let _ = writeln!(self.out, "{}", detail.trim_end_matches('\n'));
     }
 
     /// A suite-level failure the event stream cannot carry: the backend died

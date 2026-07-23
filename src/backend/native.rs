@@ -255,12 +255,17 @@ fn run_spec_file(plan: &SuitePlan, spec: &Path) -> SpecResult {
     let require = {
         let loader = Rc::clone(&loader);
         lua.create_function(move |lua, spec_str: String| {
-            let from = loader
-                .stack
-                .borrow()
-                .last()
-                .cloned()
-                .ok_or_else(|| LuaError::runtime("require called outside of a module"))?;
+            let from = loader.stack.borrow().last().cloned().ok_or_else(|| {
+                // The loader stack is only populated while a module is
+                // loading, so a require from a test body (or any deferred
+                // function) lands here. The bare "outside of a module"
+                // phrasing cost a consumer a debugging round — say what
+                // to do, not just what happened.
+                LuaError::runtime(
+                    "require() on the native backend resolves only while a spec file is \
+                         loading — move this require to the top of the file",
+                )
+            })?;
             match loader.resolver.resolve(&from, &spec_str) {
                 Ok(Resolved::File(path)) => load_module(lua, &loader, &path),
                 Ok(Resolved::Builtin { runtime, module }) => Err(LuaError::runtime(format!(

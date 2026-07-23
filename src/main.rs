@@ -948,6 +948,15 @@ pub fn run_suites_with(
     // The summary always runs, even on a mid-run tool error, so partial output
     // is never left without its footer.
     reporter.finish(&totals, &snapshots, started.elapsed());
+    // The summary line counts obsolete snapshots; this says what to do about
+    // them. Not under `-u` — that run just pruned them.
+    if snapshots.obsolete > 0 && !params.update {
+        reporter.note(&format!(
+            "run `lest -u` to prune {} obsolete snapshot{}",
+            snapshots.obsolete,
+            if snapshots.obsolete == 1 { "" } else { "s" }
+        ));
+    }
 
     if let Some(err) = fatal {
         return Err(err);

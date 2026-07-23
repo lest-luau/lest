@@ -275,7 +275,10 @@ fn write_suite<W: Write>(out: &mut W, suite: &JunitSuite) {
 
 fn write_case<W: Write>(out: &mut W, case: &JunitCase) {
     let open = format!(
-        r#"    <testcase name="{}" classname="{}" time="{:.3}""#,
+        // Six decimals (microseconds): Luau tests routinely finish in well
+        // under a millisecond, and at three decimals every one of them
+        // published time="0.000".
+        r#"    <testcase name="{}" classname="{}" time="{:.6}""#,
         escape_attr(&case.name),
         escape_attr(&case.classname),
         case.time_secs,
@@ -402,7 +405,8 @@ mod tests {
         assert!(out.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
         assert!(out.contains(r#"<testsuites name="lest" tests="2" failures="0" skipped="1""#));
         assert!(out.contains(r#"<testsuite name="unit (native)" tests="2""#));
-        assert!(out.contains(r#"<testcase name="adds" classname="math" time="0.002"/>"#));
+        // Six decimals: a 1.5ms test is real time, not time="0.000".
+        assert!(out.contains(r#"<testcase name="adds" classname="math" time="0.001500"/>"#));
         assert!(out.contains(r#"<skipped message="wip"/>"#));
         assert!(out.trim_end().ends_with("</testsuites>"));
     }

@@ -227,6 +227,17 @@ impl CoverageData {
         let painted = colorize_percent(color, overall, &pct_cell);
         let _ = writeln!(out, "{}", row(&name, &lines_cell, &painted));
         let _ = writeln!(out, "{}", rule("└", "┴", "┘"));
+
+        // The percentages say how much was missed; these say *where*. lcov
+        // carries the same data, but needing an external viewer to learn two
+        // line numbers is a paper cut — so each sub-100% file names its
+        // missed lines, in the note voice.
+        for file in &self.files {
+            if let Some(ranges) = missed_ranges(file) {
+                let note = paint(color, DIM, &format!("  {} missed: {ranges}", file.path));
+                let _ = writeln!(out, "{note}");
+            }
+        }
         out
     }
 
@@ -249,6 +260,50 @@ impl CoverageData {
             out.push_str("end_of_record\n");
         }
         out
+    }
+}
+
+/// How many missed-line ranges the table note lists before eliding — enough
+/// to act on, bounded so a barely-covered file cannot flood the report.
+const MISSED_RANGES_SHOWN: usize = 8;
+
+/// An instrumented file's missed lines compressed to ranges (`44, 51-52`),
+/// or `None` when nothing was missed (or nothing instrumented).
+fn missed_ranges(file: &FileCoverage) -> Option<String> {
+    let lines = file.lines.as_ref()?;
+    // BTreeMap iteration is already ascending.
+    let missed: Vec<u32> = lines
+        .iter()
+        .filter(|(_, &hits)| hits == 0)
+        .map(|(&line, _)| line)
+        .collect();
+    if missed.is_empty() {
+        return None;
+    }
+    let mut ranges: Vec<String> = Vec::new();
+    let mut start = missed[0];
+    let mut end = missed[0];
+    for &line in &missed[1..] {
+        if line == end + 1 {
+            end = line;
+        } else {
+            ranges.push(range_text(start, end));
+            (start, end) = (line, line);
+        }
+    }
+    ranges.push(range_text(start, end));
+    if ranges.len() > MISSED_RANGES_SHOWN {
+        ranges.truncate(MISSED_RANGES_SHOWN);
+        ranges.push("…".to_string());
+    }
+    Some(ranges.join(", "))
+}
+
+fn range_text(start: u32, end: u32) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
     }
 }
 
@@ -323,6 +378,41 @@ mod tests {
         assert!(table.contains("b.luau"));
         assert!(table.contains("—")); // not instrumented cell
         assert!(table.contains("All files"));
+    }
+
+    #[test]
+    fn missed_lines_compress_to_ranges_and_cap() {
+        let file = FileCoverage::instrumented(
+            "a.luau",
+            lines(&[(1, 1), (2, 0), (3, 0), (4, 1), (7, 0), (9, 0), (10, 0)]),
+        );
+        assert_eq!(missed_ranges(&file).as_deref(), Some("2-3, 7, 9-10"));
+
+        let covered = FileCoverage::instrumented("b.luau", lines(&[(1, 1)]));
+        assert_eq!(missed_ranges(&covered), None);
+        assert_eq!(
+            missed_ranges(&FileCoverage::not_instrumented("c.luau")),
+            None
+        );
+
+        // Every other line missed: ranges never merge, so the cap elides.
+        let scattered = FileCoverage::instrumented("d.luau", (0..20).map(|i| (i * 2, 0)).collect());
+        let text = missed_ranges(&scattered).unwrap();
+        assert_eq!(text.matches(", ").count(), MISSED_RANGES_SHOWN);
+        assert!(text.ends_with('…'), "{text}");
+    }
+
+    #[test]
+    fn table_names_missed_lines_for_partial_files() {
+        let mut cov = CoverageData::new();
+        cov.add(FileCoverage::instrumented(
+            "a.luau",
+            lines(&[(1, 1), (2, 0), (3, 0)]),
+        ));
+        cov.add(FileCoverage::instrumented("b.luau", lines(&[(1, 5)])));
+        let table = cov.table(false);
+        assert!(table.contains("a.luau missed: 2-3"), "{table}");
+        assert!(!table.contains("b.luau missed"), "{table}");
     }
 
     #[test]

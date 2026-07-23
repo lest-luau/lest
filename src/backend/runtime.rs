@@ -21,6 +21,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::report::{check_protocol_version, Event, Failure};
@@ -32,6 +33,11 @@ use crate::error::ToolError;
 const SENTINEL: &str = "@@LEST@@";
 const SPEC_SENTINEL: &str = "@@LEST_SPEC@@";
 const HARNESS_TEMPLATE: &str = include_str!("../../luau/runtime/harness.luau");
+
+/// How many trailing stderr lines are retained for diagnosing a process that
+/// dies before speaking the protocol. A bound, not a log — the lines still
+/// stream to the terminal as they arrive.
+const STDERR_TAIL_LINES: usize = 20;
 
 fn install_hint(runtime: Runtime) -> &'static str {
     match runtime {
@@ -149,7 +155,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
         .current_dir(&plan.root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -171,6 +177,30 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
             }
         }
     });
+
+    // stderr is piped only so its tail can be inspected when the process dies
+    // before speaking the protocol — every line still streams to our stderr
+    // the moment it arrives, so runtime and test diagnostics reach the
+    // terminal as they did when it was inherited. The motivating case: a
+    // rokit shim whose tool is missing from the project manifest exits
+    // nonzero with one clear stderr line, which used to scroll past while
+    // lest reported only a bare exit code.
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = {
+        let tail = Arc::clone(&stderr_tail);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                eprintln!("{line}");
+                let mut tail = tail.lock().unwrap();
+                if tail.len() >= STDERR_TAIL_LINES {
+                    tail.remove(0);
+                }
+                tail.push(line);
+            }
+        })
+    };
 
     // The whole suite runs in one process, so the per-test budget is scaled
     // into a per-process budget; a stuck runtime can only be timed out by
@@ -194,14 +224,16 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
     // harness broke before running anything — a false green we refuse.
     let mut outcomes = 0usize;
 
+    type Readers = (std::thread::JoinHandle<()>, std::thread::JoinHandle<()>);
     let abort = |mut child: Child,
                  rx: mpsc::Receiver<std::io::Result<String>>,
-                 reader: std::thread::JoinHandle<()>,
+                 readers: Readers,
                  err: ToolError| {
         let _ = child.kill();
         let _ = child.wait();
         drop(rx);
-        let _ = reader.join();
+        let _ = readers.0.join();
+        let _ = readers.1.join();
         err
     };
 
@@ -216,6 +248,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
             let _ = child.wait();
             drop(rx);
             let _ = reader.join();
+            let _ = stderr_reader.join();
 
             report_budget_timeout(plan, &command, budget, current_spec, on_event);
             return Ok(());
@@ -241,7 +274,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
                             return Err(abort(
                                 child,
                                 rx,
-                                reader,
+                                (reader, stderr_reader),
                                 ToolError(format!(
                                     "{command} suite \"{}\" sent the spec-boundary marker \
                                      \"{raw}\", which is not a 1-based index into its {} spec \
@@ -265,7 +298,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
                             return Err(abort(
                                 child,
                                 rx,
-                                reader,
+                                (reader, stderr_reader),
                                 ToolError(format!(
                                     "undecodable protocol line from {command} while running \
                                      suite \"{}\": {err}",
@@ -282,7 +315,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
                             return Err(abort(
                                 child,
                                 rx,
-                                reader,
+                                (reader, stderr_reader),
                                 ToolError(format!(
                                     "framework/CLI protocol mismatch from {command}: {mismatch}"
                                 )),
@@ -308,7 +341,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
                 return Err(abort(
                     child,
                     rx,
-                    reader,
+                    (reader, stderr_reader),
                     ToolError(format!("cannot read {command} output: {err}")),
                 ));
             }
@@ -330,6 +363,7 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stderr_reader.join();
                 report_budget_timeout(plan, &command, budget, current_spec, on_event);
                 return Ok(());
             }
@@ -337,11 +371,32 @@ pub fn run(runtime: Runtime, plan: &SuitePlan, on_event: &mut EventSink) -> Resu
             Err(e) => return Err(ToolError(format!("cannot wait for {command}: {e}"))),
         }
     };
+    // Joined only after the child exited: its stderr is at EOF, so this never
+    // blocks — joining before the wait loop could deadlock on a hung child
+    // still holding the pipe.
+    let _ = stderr_reader.join();
     if !status.success() {
-        return Err(ToolError(format!(
+        let mut message = format!(
             "{command} exited with {status} while running suite \"{}\"",
             plan.name
-        )));
+        );
+        // A rokit shim resolves its tool per project manifest, so a `lune` on
+        // PATH can still fail to *be* lune here — and the bare exit code
+        // reads as the runtime crashing. The shim says what happened in one
+        // stderr line; the retained tail is what lets it be named.
+        if stderr_tail
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("Failed to find tool"))
+        {
+            message = format!(
+                "{message}\n`{command}` on PATH is a rokit shim, and this project's rokit.toml \
+                 does not list the tool — {}",
+                install_hint(runtime)
+            );
+        }
+        return Err(ToolError(message));
     }
     // A name filter legitimately produces zero outcomes, so it disarms this
     // guard — the CLI reports the no-match case itself, with a message that
