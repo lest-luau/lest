@@ -118,6 +118,42 @@ impl<W: Write> Pretty<W> {
         let _ = writeln!(self.out, "{header}\n{}", detail.trim_end_matches('\n'));
     }
 
+    /// A suite-level failure the event stream cannot carry: the backend died
+    /// mid-suite (a runtime that would not start, a cloud task that never
+    /// decoded). A dead backend emits no `test_fail`, so without this the
+    /// suite counted as *passed* in the very summary printed above the fatal
+    /// error. Renders a failure line inside the suite and fixes the
+    /// `Test Suites:` count; the detailed diagnostic still follows the report.
+    pub fn suite_error(&mut self, message: &str) {
+        self.flush_pending();
+        self.mark_suite_failed();
+        let line = format!("{} {}", self.paint(RED, "✗"), self.paint(RED, message));
+        let _ = writeln!(self.out, "{}{line}", indent(1));
+    }
+
+    /// Snapshot mismatches in the suite that just ran. Comparison is
+    /// host-side, after each event streamed, so the tree has already printed
+    /// `✓` beside the owning tests — this line is what keeps the suite from
+    /// *reading* green, and points at the diffs printed after the tree.
+    pub fn suite_snapshot_failures(&mut self, count: usize) {
+        self.flush_pending();
+        self.mark_suite_failed();
+        let noun = if count == 1 { "snapshot" } else { "snapshots" };
+        let line = format!(
+            "{} {}",
+            self.paint(RED, "✗"),
+            self.paint(RED, &format!("{count} {noun} did not match — diffs below"))
+        );
+        let _ = writeln!(self.out, "{}{line}", indent(1));
+    }
+
+    fn mark_suite_failed(&mut self) {
+        if !self.current_suite_failed {
+            self.current_suite_failed = true;
+            self.suites_failed += 1;
+        }
+    }
+
     pub fn on_event(&mut self, event: &Event) {
         match event {
             Event::SuiteStart { path } => {
@@ -514,6 +550,73 @@ mod tests {
         let t6 = block.find("s › t6").unwrap();
         let t2 = block.find("s › t2").unwrap();
         assert!(t6 < t2);
+    }
+
+    /// The regression: a backend that died mid-suite emitted no test_fail, so
+    /// the summary said `Test Suites: 1 passed` right above the fatal error.
+    #[test]
+    fn suite_error_prints_and_fails_the_suite() {
+        let mut buf = Vec::new();
+        {
+            let mut pretty = Pretty::new(&mut buf, false);
+            pretty.begin_suite("scripts", "lune");
+            pretty.suite_error("the suite did not finish: lune exited with exit code: 1");
+            pretty.finish(
+                &Totals::default(),
+                &SnapshotSummary::default(),
+                Duration::from_millis(10),
+            );
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("✗ the suite did not finish"), "{out}");
+        assert!(
+            out.contains("Test Suites: 1 failed, 0 passed, 1 total"),
+            "{out}"
+        );
+    }
+
+    /// Snapshot comparison happens host-side, after the tree printed `✓` —
+    /// the suite must still not read as passed.
+    #[test]
+    fn snapshot_mismatches_fail_the_suite_and_point_at_the_diffs() {
+        let mut buf = Vec::new();
+        {
+            let mut pretty = Pretty::new(&mut buf, false);
+            pretty.begin_suite("unit", "native");
+            pretty.on_event(&Event::TestPass {
+                path: vec!["Report".into()],
+                name: "renders".into(),
+                duration_ms: 0.1,
+            });
+            pretty.suite_snapshot_failures(2);
+            // The host hands finish the reconciled totals (the pass flipped
+            // to a failure), exactly as the run loop does.
+            pretty.finish(
+                &Totals {
+                    passed: 0,
+                    failed: 1,
+                    skipped: 0,
+                },
+                &SnapshotSummary {
+                    failed: 2,
+                    ..SnapshotSummary::default()
+                },
+                Duration::from_millis(10),
+            );
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("✗ 2 snapshots did not match — diffs below"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Test Suites: 1 failed, 0 passed, 1 total"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Tests:       1 failed, 0 passed, 1 total"),
+            "{out}"
+        );
     }
 
     #[test]

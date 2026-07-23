@@ -222,6 +222,31 @@ impl AnyReporter {
         }
     }
 
+    /// A backend died mid-suite. A dead backend emits nothing, so the event
+    /// stream cannot say so — yet the suite is anything but passed, and the
+    /// summary above the fatal error used to claim it was. Each reporter
+    /// renders the verdict in its own idiom; the CLI still prints the
+    /// detailed diagnostic after the summary.
+    pub fn suite_error(&mut self, message: &str) {
+        match self {
+            AnyReporter::Pretty(r) => r.suite_error(message),
+            AnyReporter::Json(r) => r.suite_error(message),
+            AnyReporter::Junit(r) => r.suite_error(message),
+        }
+    }
+
+    /// Marks the suite that just ran failed because `count` of its snapshots
+    /// mismatched. Pretty prints a pointer line and fixes its `Test Suites:`
+    /// count; Json consumers already see the corrected synthesized `run_end`
+    /// plus a structured `snapshot_failure` line per key; JUnit synthesizes a
+    /// real `<testcase>` per mismatch, so anything here would double-report.
+    pub fn suite_snapshot_failures(&mut self, count: usize) {
+        match self {
+            AnyReporter::Pretty(r) => r.suite_snapshot_failures(count),
+            AnyReporter::Json(_) | AnyReporter::Junit(_) => {}
+        }
+    }
+
     pub fn on_event(&mut self, event: &Event) {
         match self {
             AnyReporter::Pretty(r) => r.on_event(event),
@@ -645,6 +670,17 @@ impl RunOutcome {
     }
 }
 
+/// A test's full name — the describe path joined with spaces, then the test
+/// name: the same identity core uses for `-t` filtering and snapshot keys.
+/// Used to match host-side snapshot verdicts back to streamed test outcomes.
+fn full_test_name(path: &[String], name: &str) -> String {
+    if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{} {}", path.join(" "), name)
+    }
+}
+
 /// The message shown when `-t` selects no tests. Shared so the hard failure in
 /// a one-shot run and the note in watch mode never drift apart.
 pub fn no_match_message(filter: &str) -> String {
@@ -774,6 +810,13 @@ pub fn run_suites_with(
 
         let mut suite_totals = Totals::default();
         let mut snapshot_err: Option<ToolError> = None;
+        // Test identities, for reconciling host-side snapshot verdicts with
+        // the streamed events below: a test whose snapshot mismatched has
+        // already streamed (and been counted) as a pass, unless it also
+        // failed on its own.
+        let mut snapshot_failed_tests: HashSet<String> = HashSet::new();
+        let mut failed_tests: HashSet<String> = HashSet::new();
+        let failures_before_suite = store.failures.len();
         // Scoped so the sink's mutable borrows of `reporter`/`totals`/`store`
         // are released before the synthesized run_end below.
         let result = {
@@ -782,15 +825,19 @@ pub fn run_suites_with(
                     // Backend framing is dropped; the CLI supplies its own.
                     Event::RunStart { .. } | Event::RunEnd { .. } => return,
                     Event::Snapshot {
+                        path,
                         name,
                         key,
                         received,
-                        ..
                     } => {
                         if let Some(spec) = spec {
                             let display = backend::display_rel(spec, root);
+                            let failures_before = store.failures.len();
                             if let Err(err) = store.record(spec, &display, key, received) {
                                 snapshot_err.get_or_insert(err);
+                            }
+                            if store.failures.len() > failures_before {
+                                snapshot_failed_tests.insert(full_test_name(path, name));
                             }
                         } else {
                             // A snapshot with no spec attribution cannot be
@@ -807,6 +854,9 @@ pub fn run_suites_with(
                                 )
                             );
                         }
+                    }
+                    Event::TestFail { path, name, .. } => {
+                        failed_tests.insert(full_test_name(path, name));
                     }
                     _ => {}
                 }
@@ -826,6 +876,28 @@ pub fn run_suites_with(
                 BackendKind::Cloud => backend::cloud::run(&plan, &suite.cloud, &mut sink),
             }
         };
+
+        // Reconcile the verdicts the event stream could not carry, *before*
+        // the synthesized run_end so every consumer sees the same counts.
+        // Snapshot comparison is host-side: a test whose snapshot mismatched
+        // streamed as a pass, and without this the summary said `passed`
+        // beside exit 1. Tests that also failed on their own are already
+        // counted and must not be double-flipped.
+        let suite_snapshot_failures = store.failures.len() - failures_before_suite;
+        if suite_snapshot_failures > 0 {
+            let flipped = snapshot_failed_tests.difference(&failed_tests).count() as u32;
+            suite_totals.passed = suite_totals.passed.saturating_sub(flipped);
+            suite_totals.failed += flipped;
+            totals.passed = totals.passed.saturating_sub(flipped);
+            totals.failed += flipped;
+            reporter.suite_snapshot_failures(suite_snapshot_failures);
+        }
+        // A dead backend emitted no test_fail, so without this the suite
+        // counted as passed in the very summary printed above the fatal
+        // error it caused.
+        if let Err(err) = &result {
+            reporter.suite_error(&format!("the suite did not finish: {err}"));
+        }
 
         // Synthesized run_end for this suite.
         reporter.on_event(&Event::RunEnd {
@@ -979,6 +1051,17 @@ pub fn find_core_entry(root: &Path, config: &Config) -> Result<PathBuf, ToolErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Must match core's `fullName` exactly — snapshot verdicts are matched
+    /// back to streamed test outcomes on this string.
+    #[test]
+    fn full_test_name_matches_core_identity() {
+        assert_eq!(full_test_name(&[], "adds"), "adds");
+        assert_eq!(
+            full_test_name(&["math".to_string(), "add".to_string()], "adds"),
+            "math add adds"
+        );
+    }
 
     fn outcome(specs: usize, totals: Totals) -> RunOutcome {
         RunOutcome {
