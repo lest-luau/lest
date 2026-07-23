@@ -278,11 +278,12 @@ local function expect (value: any): any
 		if substring ~= nil then
 			local message = errorMessage(err)
 			if string.find(message, substring, 1, true) == nil then
-				fail(
-					`expected error message to contain {format.value(substring)}`,
-					format.value(substring),
-					format.value(message)
-				)
+				-- The received side is the raw message, not `format.value` of
+				-- it: quoting-and-escaping a real error (which usually opens
+				-- with a `path:line:` position) buried the comparison under
+				-- doubled backslashes. The expected side stays quoted — it is
+				-- a user-supplied substring whose exact boundaries matter.
+				fail(`expected error message to contain {format.value(substring)}`, format.value(substring), message)
 			end
 		end
 		return expectation
