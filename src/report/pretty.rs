@@ -181,6 +181,7 @@ impl<W: Write> Pretty<W> {
                 name,
                 duration_ms,
                 failure,
+                origin,
             } => {
                 self.flush_pending();
                 // `(load)` is synthesized by every backend when a spec file
@@ -210,7 +211,7 @@ impl<W: Write> Pretty<W> {
                     )
                 };
                 self.test_line(path, &line);
-                self.failure_block(path.len(), failure);
+                self.failure_block(path.len(), failure, origin.as_deref());
             }
             Event::TestSkip { path, name, reason } => {
                 self.flush_pending();
@@ -346,11 +347,18 @@ impl<W: Write> Pretty<W> {
         let _ = writeln!(self.out, "{}{line}", indent(path.len() + 1));
     }
 
-    fn failure_block(&mut self, depth: usize, failure: &Failure) {
+    fn failure_block(&mut self, depth: usize, failure: &Failure, origin: Option<&str>) {
         let pad = indent(depth + 2);
         // A blank line above the detail; the one below is deferred so it never
         // doubles up before a self-spacing section (see `pending_blank`).
         let _ = writeln!(self.out);
+        // A failure from a hook, not the test body: without this label the
+        // reader has to notice the failing line sits outside the test to
+        // realize setup broke.
+        if let Some(origin) = origin {
+            let label = self.paint(DIM, &format!("failed in {origin}:"));
+            let _ = writeln!(self.out, "{pad}{label}");
+        }
         match failure {
             Failure::Assertion {
                 message,
@@ -459,6 +467,7 @@ mod tests {
                 expected: Some("2".into()),
                 received: Some("1".into()),
             },
+            origin: None,
         }]);
         assert!(out.contains("✗ breaks"));
         assert!(out.contains("Expected: 2"));
@@ -467,6 +476,25 @@ mod tests {
         assert!(out.contains("Tests:       1 failed, 0 passed, 1 total"));
         assert!(out.contains("Snapshots:   0 total"));
         assert!(out.contains("Time:        0.12s"));
+    }
+
+    /// A hook failure names its origin — the reader should not have to
+    /// notice that the failing line sits outside the test body to realize
+    /// setup broke, not the test.
+    #[test]
+    fn hook_failures_are_labeled_with_their_origin() {
+        let out = render(&[Event::TestFail {
+            path: vec!["doomed".into()],
+            name: "never runs".into(),
+            duration_ms: 0.0,
+            failure: Failure::Error {
+                message: "the database is down".into(),
+                trace: None,
+            },
+            origin: Some("beforeAll".into()),
+        }]);
+        assert!(out.contains("failed in beforeAll:"), "{out}");
+        assert!(out.contains("the database is down"), "{out}");
     }
 
     /// `(load)` is a synthesized outcome — nothing ran, so a timing would be
@@ -482,6 +510,7 @@ mod tests {
                     message: "boom".into(),
                     trace: None,
                 },
+                origin: None,
             },
             // A real test, so the slowest block renders and can be inspected.
             Event::TestPass {

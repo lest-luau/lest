@@ -423,6 +423,7 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 							name = '(afterAll)',
 							durationMs = 0,
 							failure = failure,
+							origin = 'afterAll',
 						})
 					end
 				end
@@ -533,12 +534,18 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 				name = test.name,
 				durationMs = 0,
 				failure = scopeFailure,
+				origin = 'beforeAll',
 			})
 			continue
 		end
 
 		local started = os.clock()
 		local failure: Failure? = nil
+		-- The hook a failure came from, carried on the event as `origin` so a
+		-- reporter can say "setup broke" — a reader otherwise has to notice
+		-- that the failing line sits outside the test body. Stays nil (off
+		-- the wire) when the test body itself failed.
+		local failedIn: string? = nil
 
 		-- Snapshot matchers reach the emitter and this test's identity through
 		-- the shared context for the duration of the test and its each-hooks.
@@ -549,6 +556,7 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 		for _, hook in eachHooks('beforeEach', test.scopePath) do
 			failure = protectedCall(hook.fn)
 			if failure ~= nil then
+				failedIn = 'beforeEach'
 				break
 			end
 		end
@@ -561,8 +569,9 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 		-- when the test itself passed.
 		for _, hook in eachHooks('afterEach', test.scopePath) do
 			local afterFailure = protectedCall(hook.fn)
-			if failure == nil then
+			if failure == nil and afterFailure ~= nil then
 				failure = afterFailure
+				failedIn = 'afterEach'
 			end
 		end
 
@@ -586,6 +595,7 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 				name = test.name,
 				durationMs = durationMs,
 				failure = failure,
+				origin = failedIn,
 			})
 		end
 	end
@@ -607,6 +617,7 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 					name = '(afterAll)',
 					durationMs = 0,
 					failure = failure,
+					origin = 'afterAll',
 				})
 			end
 		end

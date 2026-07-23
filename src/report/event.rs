@@ -75,6 +75,14 @@ pub enum Event {
         name: String,
         duration_ms: f64,
         failure: Failure,
+        /// The hook the failure happened in (`beforeAll`, `beforeEach`,
+        /// `afterEach`) when it was not the test body itself. Without it a
+        /// reader has to notice that the failing line sits outside the test
+        /// to realize setup broke, not the test. Additive: absent from older
+        /// frameworks and from failures in the body, and kept off the wire
+        /// when unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     TestSkip {
         path: Vec<String>,
@@ -168,8 +176,33 @@ mod tests {
                     expected: Some("2".into()),
                     received: Some("1".into()),
                 },
+                origin: None,
             }
         );
+    }
+
+    /// `origin` is additive: absent decodes to `None`, present survives, and
+    /// an unset one stays off the wire when re-encoded.
+    #[test]
+    fn origin_field_is_additive() {
+        let line = r#"{"kind":"test_fail","path":[],"name":"t","durationMs":0,"origin":"beforeAll","failure":{"type":"error","message":"boom"}}"#;
+        let event: Event = serde_json::from_str(line).unwrap();
+        match &event {
+            Event::TestFail { origin, .. } => assert_eq!(origin.as_deref(), Some("beforeAll")),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let without = Event::TestFail {
+            path: vec![],
+            name: "t".into(),
+            duration_ms: 0.0,
+            failure: Failure::Error {
+                message: "boom".into(),
+                trace: None,
+            },
+            origin: None,
+        };
+        let encoded = serde_json::to_string(&without).unwrap();
+        assert!(!encoded.contains("origin"), "{encoded}");
     }
 
     #[test]

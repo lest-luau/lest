@@ -860,6 +860,23 @@ pub fn run_suites_with(
                     }
                     _ => {}
                 }
+                // Failures are polished for human eyes before any consumer
+                // sees them: project paths become root-relative, lest's own
+                // frames drop out of traces (core takes the traceback, so
+                // `protectedCall`/`run` appeared in every single failure),
+                // and mlua's error framing is normalized. Here rather than in
+                // a backend so every backend and every reporter agree.
+                let event: std::borrow::Cow<Event> = match event {
+                    Event::TestFail { .. } => {
+                        let mut polished = event.clone();
+                        if let Event::TestFail { failure, .. } = &mut polished {
+                            backend::polish_failure(failure, root, &core_entry);
+                        }
+                        std::borrow::Cow::Owned(polished)
+                    }
+                    _ => std::borrow::Cow::Borrowed(event),
+                };
+                let event = event.as_ref();
                 suite_totals.record(event);
                 totals.record(event);
                 reporter.on_event(event);
