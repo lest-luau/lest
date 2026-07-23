@@ -540,9 +540,32 @@ fn append_extension(path: &Path, ext: &str) -> PathBuf {
 /// more tests, exactly the right failure mode for watch mode. Also matches
 /// the parenthesis-free `require "foo"` call form.
 pub fn scan_requires(source: &str) -> Vec<String> {
+    scan_requires_spanned(source)
+        .into_iter()
+        .map(|found| found.spec)
+        .collect()
+}
+
+/// A require literal found by [`scan_requires_spanned`]: the spec string and
+/// the 1-based line of the `require` keyword — the call site, so a literal
+/// wrapped onto the next line still reports the line a reader would look at.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScannedRequire {
+    pub spec: String,
+    pub line: usize,
+}
+
+/// [`scan_requires`] with source positions, for callers that turn a require
+/// into a diagnostic (the cloud bundler warns on unresolvable literals) —
+/// resolution itself never needs them. Same lexical scan, same caveats.
+pub fn scan_requires_spanned(source: &str) -> Vec<ScannedRequire> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut search_from = 0;
+    // Match positions strictly increase, so the line of each is counted
+    // incrementally from the previous match rather than from the top.
+    let mut line = 1;
+    let mut counted_upto = 0;
     while let Some(found) = source[search_from..].find("require") {
         let start = search_from + found;
         search_from = start + "require".len();
@@ -583,7 +606,15 @@ pub fn scan_requires(source: &str) -> Vec<String> {
             i += 1;
         }
         if i < bytes.len() && bytes[i] == quote {
-            out.push(source[literal_start..i].to_string());
+            line += bytes[counted_upto..start]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count();
+            counted_upto = start;
+            out.push(ScannedRequire {
+                spec: source[literal_start..i].to_string(),
+                line,
+            });
             search_from = i + 1;
         }
     }

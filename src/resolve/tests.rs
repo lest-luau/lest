@@ -249,6 +249,16 @@ fn scan_requires_finds_literals_only() {
 }
 
 #[test]
+fn scan_requires_spanned_reports_the_call_site_line() {
+    let source = "-- header\nlocal a = require('./a')\n\nlocal b = require(\n\t'./b'\n)\n";
+    let found = crate::resolve::scan_requires_spanned(source);
+    let positions: Vec<(&str, usize)> = found.iter().map(|r| (r.spec.as_str(), r.line)).collect();
+    // `./b` reports the `require` keyword's line (4), not its literal's (5) —
+    // the call site is where a reader looks.
+    assert_eq!(positions, vec![("./a", 2), ("./b", 4)]);
+}
+
+#[test]
 fn dependency_closure_walks_transitive_requires() {
     let dir = tree(&["spec.luau", "a.luau", "b.luau", "unrelated.luau"]);
     std::fs::write(
