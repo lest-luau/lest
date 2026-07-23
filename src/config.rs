@@ -1,6 +1,5 @@
 use std::fmt;
 use std::fs;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -196,21 +195,8 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
                 .map_err(|e| ToolError(format!("cannot read {}: {e}", path.display())))?;
             let raw: RawConfig = toml::from_str(&text)
                 .map_err(|e| ToolError(format!("cannot parse {}:\n{e}", path.display())))?;
-            let warnings = config_warnings(&text, &raw, &path);
-            if !warnings.is_empty() {
-                // Warnings belong on stderr in the one diagnostic voice. This
-                // runs before the CLI has computed its color flags, so the
-                // decision is made here by the same rule `main` uses: an argv
-                // `--no-color` (stopping at the `--` escape), `NO_COLOR`, and
-                // stderr's own terminal state.
-                let no_color = std::env::args()
-                    .take_while(|a| a != "--")
-                    .any(|a| a == "--no-color")
-                    || std::env::var_os("NO_COLOR").is_some();
-                let color = !no_color && std::io::stderr().is_terminal();
-                for warning in &warnings {
-                    eprint!("{}", crate::report::render_warning(warning, color));
-                }
+            for warning in config_warnings(&text, &raw, &path) {
+                crate::report::warn_to_stderr(&warning);
             }
             let root = path.parent().unwrap_or(cwd).to_path_buf();
             (raw, root, Some(path))

@@ -24,7 +24,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::resolve::{normalize, scan_requires, Resolved, Resolver};
+use crate::resolve::{
+    normalize, scan_requires, scan_requires_spanned, ResolveError, Resolved, Resolver,
+};
 
 use crate::error::ToolError;
 
@@ -33,6 +35,52 @@ use crate::error::ToolError;
 pub struct SpecEntry {
     pub name: String,
     pub path: PathBuf,
+}
+
+/// A bundled entrypoint plus what the bundler noticed while building it.
+pub struct Bundle {
+    /// The self-contained Luau script an Open Cloud task runs.
+    pub script: String,
+    /// String requires that failed to resolve, in module-emission order. Not
+    /// an error — the require may be dead code in the engine (a shared module
+    /// branching on runtime) — but worth a warning with a real source
+    /// position, because the alternative is the shim's runtime error at a
+    /// bundle coordinate no reader can use.
+    pub unresolved: Vec<UnresolvedRequire>,
+}
+
+/// A string require the bundler could not resolve, omitted from the emitted
+/// `__map` exactly as before — this is the report, not a behavior change.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnresolvedRequire {
+    /// The requiring module, normalized — the same spelling used as its
+    /// closure key.
+    pub file: PathBuf,
+    /// 1-based line of the `require` call site.
+    pub line: usize,
+    pub spec: String,
+    /// A one-line reason, already phrased for a warning body.
+    pub reason: String,
+}
+
+/// Compresses a [`ResolveError`] into a fragment a one-line warning can carry
+/// — the error's own `Display` runs multi-line for some variants (`NotFound`
+/// lists every probed path).
+fn brief_reason(error: &ResolveError) -> String {
+    match error {
+        ResolveError::UnsupportedSpec { .. } => {
+            "require paths start with \"./\", \"../\", or an \"@\" alias".to_string()
+        }
+        ResolveError::UnknownAlias { .. } => "unknown alias".to_string(),
+        ResolveError::InvalidSelf { .. } => "@self is only valid from an init module".to_string(),
+        ResolveError::Luaurc { path, .. } => {
+            format!("unreadable .luaurc at {}", path.display())
+        }
+        ResolveError::Project { path, .. } => {
+            format!("unreadable rojo project at {}", path.display())
+        }
+        ResolveError::NotFound { .. } => "no matching file on disk".to_string(),
+    }
 }
 
 /// Everything the bundler needs to emit one self-contained entrypoint.
@@ -87,7 +135,7 @@ impl SourceCache {
 /// fresh. Production always bundles a whole suite and shares a [`SourceCache`]
 /// via [`bundle_with_cache`], so this convenience form exists for tests only.
 #[cfg(test)]
-pub fn bundle(input: &BundleInput) -> Result<String, ToolError> {
+pub fn bundle(input: &BundleInput) -> Result<Bundle, ToolError> {
     bundle_with_cache(input, &mut SourceCache::default())
 }
 
@@ -97,7 +145,7 @@ pub fn bundle(input: &BundleInput) -> Result<String, ToolError> {
 pub fn bundle_with_cache(
     input: &BundleInput,
     cache: &mut SourceCache,
-) -> Result<String, ToolError> {
+) -> Result<Bundle, ToolError> {
     let core = normalize(input.core_entry);
     let resolver = Resolver::new();
 
@@ -154,8 +202,9 @@ pub fn bundle_with_cache(
     let mut out = String::new();
     out.push_str(PRELUDE);
 
+    let mut unresolved = Vec::new();
     for path in &modules {
-        emit_module(&mut out, path, &id_of, cache, &resolver)?;
+        emit_module(&mut out, path, &id_of, cache, &resolver, &mut unresolved)?;
     }
     // The CLI-embedded in-engine runtime, inlined from compiled-in source
     // under fixed `lr_*` ids.
@@ -233,7 +282,10 @@ return collector.events()
         deadline = input.deadline_ms,
     ));
 
-    Ok(out)
+    Ok(Bundle {
+        script: out,
+        unresolved,
+    })
 }
 
 /// One module of the CLI-embedded in-engine runtime.
@@ -285,13 +337,16 @@ fn embedded_id_for(arg: &str) -> Option<&'static str> {
 /// Emits a factory for a project module (lest/core, a spec, or a dependency),
 /// taking its source from `cache` — always a hit, since the closure walk read
 /// every module through the same cache — and resolving its requires against
-/// the on-disk closure.
+/// the on-disk closure. Requires that fail to resolve are reported into
+/// `unresolved` with their call-site line, since the alternative report is the
+/// shim's runtime error at a bundle coordinate.
 fn emit_module(
     out: &mut String,
     path: &Path,
     id_of: &BTreeMap<PathBuf, String>,
     cache: &mut SourceCache,
     resolver: &Resolver,
+    unresolved: &mut Vec<UnresolvedRequire>,
 ) -> Result<(), ToolError> {
     let id = id_of
         .get(&normalize(path))
@@ -303,14 +358,27 @@ fn emit_module(
     // to it. Unresolvable requires and builtins are omitted; the injected
     // `require` errors clearly if the module reaches for one at run time.
     let mut mappings: BTreeMap<String, String> = BTreeMap::new();
-    for spec in scan_requires(source) {
-        if mappings.contains_key(&spec) {
+    for found in scan_requires_spanned(source) {
+        if mappings.contains_key(&found.spec) {
             continue;
         }
-        if let Ok(Resolved::File(target)) = resolver.resolve(path, &spec) {
-            if let Some(target_id) = id_of.get(&normalize(&target)) {
-                mappings.insert(spec, target_id.clone());
+        match resolver.resolve(path, &found.spec) {
+            Ok(Resolved::File(target)) => {
+                if let Some(target_id) = id_of.get(&normalize(&target)) {
+                    mappings.insert(found.spec, target_id.clone());
+                }
             }
+            // Builtins (`@lune/*`, `@lute/*`) are deliberate in modules shared
+            // across runtimes, where the engine branch never reaches them —
+            // legal dead code, not worth a warning. One that *is* reached
+            // still hits the shim's loud runtime error.
+            Ok(Resolved::Builtin { .. }) => {}
+            Err(error) => unresolved.push(UnresolvedRequire {
+                file: path.to_path_buf(),
+                line: found.line,
+                spec: found.spec,
+                reason: brief_reason(&error),
+            }),
         }
     }
     write_module_factory(out, &path.display().to_string(), &id, source, &mappings);
@@ -489,7 +557,11 @@ mod tests {
             name_filter: None,
             deadline_ms: 30000,
         };
-        let script = bundle(&input).expect("bundle should succeed");
+        let bundle = bundle(&input).expect("bundle should succeed");
+        // Every require in lest's own core and specs resolves — a warning here
+        // would mean the framework ships a require its own bundler cannot see.
+        assert_eq!(bundle.unresolved, vec![]);
+        let script = bundle.script;
 
         // Structural properties of a self-contained bundle:
         assert!(script.contains("__lest_modules"));
@@ -538,7 +610,7 @@ mod tests {
             name_filter: None,
             deadline_ms: 30000,
         };
-        let script = bundle(&input).unwrap();
+        let script = bundle(&input).unwrap().script;
 
         // The engine's require is captured in the prelude, before any factory
         // shadows the name — a capture after the first factory would grab the
@@ -630,8 +702,60 @@ mod tests {
             name_filter: None,
             deadline_ms: 1000,
         };
-        let script = bundle(&input).expect("a dynamic instance require must not block bundling");
-        assert!(script.contains("ChiefTests"), "the spec body must inline");
+        let bundle = bundle(&input).expect("a dynamic instance require must not block bundling");
+        assert!(
+            bundle.script.contains("ChiefTests"),
+            "the spec body must inline"
+        );
+        // Invisible to the static scan means unwarned too — a dynamic
+        // instance require is the supported pattern, not a miss.
+        assert_eq!(bundle.unresolved, vec![]);
+    }
+
+    /// The other half of the field report: `require('src')` failed in the
+    /// engine with neither the file nor the line. The bundler knows both at
+    /// bundle time; it reports them so the CLI can warn before the upload.
+    #[test]
+    fn unresolvable_string_requires_are_reported_with_call_sites() {
+        let root = repo_root();
+        let dir = tempfile::tempdir().unwrap();
+        let spec = dir.path().join("bad.spec.luau");
+        std::fs::write(
+            &spec,
+            "--!strict\n\
+             local bare = require('src')\n\
+             local missing = require('./missing')\n\
+             local fs = require('@lune/fs')\n\
+             return nil\n",
+        )
+        .unwrap();
+
+        let specs = vec![SpecEntry {
+            name: "bad.spec".to_string(),
+            path: spec.clone(),
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            deadline_ms: 1000,
+        };
+        let bundle = bundle(&input).expect("unresolvable requires must not block bundling");
+
+        let spec_key = normalize(&spec);
+        let misses: Vec<(&str, usize)> = bundle
+            .unresolved
+            .iter()
+            .filter(|miss| miss.file == spec_key)
+            .map(|miss| (miss.spec.as_str(), miss.line))
+            .collect();
+        // The builtin is absent: legal dead code in a shared module, so it
+        // earns no warning. The other two carry their call-site lines.
+        assert_eq!(misses, vec![("src", 2), ("./missing", 3)]);
+        // Reasons are one-line fragments a warning body can carry.
+        for miss in &bundle.unresolved {
+            assert!(!miss.reason.contains('\n'), "multi-line: {}", miss.reason);
+        }
     }
 
     #[test]
@@ -648,7 +772,7 @@ mod tests {
             name_filter: Some("adds numbers"),
             deadline_ms: 5000,
         };
-        let script = bundle(&input).unwrap();
+        let script = bundle(&input).unwrap().script;
         assert!(script.contains("nameFilter = 'adds numbers'"));
         assert!(script.contains("deadlineMs = 5000"));
     }
