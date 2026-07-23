@@ -189,7 +189,7 @@ Details worth knowing:
   one.
 - If the mapped instance is missing at run time, the test fails with the
   mapped path and a pointer at the likely cause (a stale place) — pair
-  `settings.rojo` with `[cloud] place_file` and that failure mode disappears.
+  `[settings] rojo` with `[cloud] place_file` and that failure mode disappears.
 - The other backends ignore this key; requires there resolve on disk as
   always.
 

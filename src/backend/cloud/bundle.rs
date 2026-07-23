@@ -137,7 +137,7 @@ pub struct BundleInput<'a> {
     pub name_filter: Option<&'a str>,
     /// Per-spec scheduler deadline inside the engine, in milliseconds.
     pub deadline_ms: u64,
-    /// The rojo project mapping (`settings.rojo`), when configured. A string
+    /// The rojo project mapping (`[settings] rojo`), when configured. A string
     /// require whose target it maps to a place ModuleScript is *delegated*:
     /// the generated require resolves the live instance and hands it to the
     /// engine's `require`, so the spec and in-place code share one module

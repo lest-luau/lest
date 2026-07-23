@@ -146,7 +146,7 @@ pub struct Config {
     /// materialized into `.lest/core`. Setting it opts out, which is how this
     /// repo dogfoods its own working copy of the framework.
     pub core: Option<String>,
-    /// Root-relative rojo project file (`settings.rojo`), consumed by the
+    /// Root-relative rojo project file (`[settings] rojo`), consumed by the
     /// cloud backend for place mapping.
     pub rojo: Option<String>,
     /// Coverage settings (native suites only).
@@ -224,7 +224,7 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
 /// cloud suite enabled, both looking exactly like a working config. Split from
 /// [`load`] so the triggers and wording are testable without capturing
 /// stderr. (When a key is accepted ahead of being consumed — as
-/// `settings.rojo` once was — its unconsumed state belongs here too, so
+/// `[settings] rojo` once was — its unconsumed state belongs here too, so
 /// acceptance never reads as support.)
 fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
     // `raw` is unused today but stays: warnings about parsed-but-unconsumed
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(other.cloud.place_file.as_deref(), Some("other-place.rbxl"));
     }
 
-    /// `settings.rojo` was warned about while it was accepted-but-unconsumed;
+    /// `[settings] rojo` was warned about while it was accepted-but-unconsumed;
     /// now that the cloud backend consumes it, setting it must be silent.
     #[test]
     fn a_set_rojo_key_is_consumed_and_earns_no_warning() {
