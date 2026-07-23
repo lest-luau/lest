@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::report::{
-    paint, render_warning, sentence, CoverageData, Event, Json, Junit, Pretty, SnapshotSummary,
-    Totals, BOLD, BOLD_RED, PROTOCOL_VERSION,
+    paint, render_warning, sentence, CoverageData, Event, Failure, Json, Junit, Pretty,
+    SnapshotMismatch, SnapshotSummary, Totals, BOLD, BOLD_RED, PROTOCOL_VERSION,
 };
 // Re-exported at the crate root because watch mode addresses the diagnostic
 // voice as `crate::render_diagnostic` / `crate::Severity`; the definitions
@@ -209,11 +209,11 @@ impl AnyReporter {
         }
     }
 
-    /// Snapshots are compared CLI-side, so a mismatch never arrives as a
-    /// protocol event — but it still fails the run. Routing it through `note`
-    /// dropped it entirely for JUnit, which published `failures="0"` alongside
-    /// exit 1; each reporter now renders it in its own idiom, and JUnit gets a
-    /// real `<testcase>` a CI annotation can point at.
+    /// The fallback surface for a snapshot failure that could not be folded
+    /// into its owning test's `test_fail` — the test failed on its own, or
+    /// the backend died before the test's verdict streamed. The common case
+    /// never lands here: a mismatch under a passing test is rewritten into
+    /// that test's failure in the run loop, so every reporter sees it inline.
     pub fn snapshot_failure(&mut self, spec: &str, key: &str, detail: &str) {
         match self {
             AnyReporter::Pretty(r) => r.snapshot_failure(spec, key, detail),
@@ -232,18 +232,6 @@ impl AnyReporter {
             AnyReporter::Pretty(r) => r.suite_error(message),
             AnyReporter::Json(r) => r.suite_error(message),
             AnyReporter::Junit(r) => r.suite_error(message),
-        }
-    }
-
-    /// Marks the suite that just ran failed because `count` of its snapshots
-    /// mismatched. Pretty prints a pointer line and fixes its `Test Suites:`
-    /// count; Json consumers already see the corrected synthesized `run_end`
-    /// plus a structured `snapshot_failure` line per key; JUnit synthesizes a
-    /// real `<testcase>` per mismatch, so anything here would double-report.
-    pub fn suite_snapshot_failures(&mut self, count: usize) {
-        match self {
-            AnyReporter::Pretty(r) => r.suite_snapshot_failures(count),
-            AnyReporter::Json(_) | AnyReporter::Junit(_) => {}
         }
     }
 
@@ -771,6 +759,9 @@ pub fn run_suites_with(
     let mut cov_acc: Option<CoverageMap> = params.coverage.then(CoverageMap::new);
     let mut non_native_specs: Vec<PathBuf> = Vec::new();
     let mut fatal: Option<ToolError> = None;
+    // Snapshot failures with no inline home (see the per-suite drain below),
+    // rendered through the fallback block after all suites.
+    let mut leftover: Vec<snapshot::SnapshotFailure> = Vec::new();
     // Warnings always go to stderr. `params.color` describes the report
     // stream, so here it only proves color was not switched off; stderr must
     // additionally be a terminal of its own. (A piped report with a TTY stderr
@@ -810,63 +801,100 @@ pub fn run_suites_with(
 
         let mut suite_totals = Totals::default();
         let mut snapshot_err: Option<ToolError> = None;
-        // Test identities, for reconciling host-side snapshot verdicts with
-        // the streamed events below: a test whose snapshot mismatched has
-        // already streamed (and been counted) as a pass, unless it also
-        // failed on its own.
-        let mut snapshot_failed_tests: HashSet<String> = HashSet::new();
-        let mut failed_tests: HashSet<String> = HashSet::new();
-        let failures_before_suite = store.failures.len();
+        // Mismatches waiting for their owning test's verdict, keyed by
+        // (spec file, full test name) — the spec file matters because two
+        // spec files in one suite may hold identically named tests. Ordering
+        // makes the fold-in below sound: the framework emits `snapshot`
+        // events from inside the test body, so they always stream before
+        // that test's own `test_pass`/`test_fail`.
+        let mut pending: HashMap<(PathBuf, String), Vec<snapshot::SnapshotFailure>> =
+            HashMap::new();
         // Scoped so the sink's mutable borrows of `reporter`/`totals`/`store`
         // are released before the synthesized run_end below.
         let result = {
             let mut sink = |spec: Option<&Path>, event: &Event| {
-                match event {
-                    // Backend framing is dropped; the CLI supplies its own.
-                    Event::RunStart { .. } | Event::RunEnd { .. } => return,
-                    Event::Snapshot {
-                        path,
-                        name,
-                        key,
-                        received,
-                    } => {
-                        if let Some(spec) = spec {
-                            let display = backend::display_rel(spec, root);
-                            let failures_before = store.failures.len();
-                            if let Err(err) = store.record(spec, &display, key, received) {
+                if let Event::Snapshot {
+                    path,
+                    name,
+                    key,
+                    received,
+                } = event
+                {
+                    if let Some(spec) = spec {
+                        let display = backend::display_rel(spec, root);
+                        match store.record(spec, &display, key, received) {
+                            Ok(Some(failure)) => {
+                                pending
+                                    .entry((spec.to_path_buf(), full_test_name(path, name)))
+                                    .or_default()
+                                    .push(failure);
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
                                 snapshot_err.get_or_insert(err);
                             }
-                            if store.failures.len() > failures_before {
-                                snapshot_failed_tests.insert(full_test_name(path, name));
-                            }
-                        } else {
-                            // A snapshot with no spec attribution cannot be
-                            // compared or stored; dropping it silently would
-                            // leave the author believing it was checked.
-                            eprint!(
-                                "{}",
-                                render_warning(
-                                    &format!(
-                                        "snapshot \"{key}\" from test \"{name}\" arrived without \
-                                         a spec file attribution — it was not compared or stored"
-                                    ),
-                                    warn_color,
-                                )
-                            );
+                        }
+                    } else {
+                        // A snapshot with no spec attribution cannot be
+                        // compared or stored; dropping it silently would
+                        // leave the author believing it was checked.
+                        eprint!(
+                            "{}",
+                            render_warning(
+                                &format!(
+                                    "snapshot \"{key}\" from test \"{name}\" arrived without \
+                                     a spec file attribution — it was not compared or stored"
+                                ),
+                                warn_color,
+                            )
+                        );
+                    }
+                }
+                let event: std::borrow::Cow<Event> = match event {
+                    // Backend framing is dropped; the CLI supplies its own.
+                    Event::RunStart { .. } | Event::RunEnd { .. } => return,
+                    // Snapshot pass/fail is the host's decision, and this is
+                    // where it lands: a passed test whose snapshots
+                    // mismatched is rewritten into a failure before any
+                    // consumer — reporters or totals — sees it, so the tree,
+                    // the JSON stream, and JUnit all carry one truth, with
+                    // the diffs attached to the test that produced them.
+                    Event::TestPass {
+                        path,
+                        name,
+                        duration_ms,
+                    } => {
+                        let mismatched = spec.and_then(|spec| {
+                            pending.remove(&(spec.to_path_buf(), full_test_name(path, name)))
+                        });
+                        match mismatched {
+                            Some(failures) => std::borrow::Cow::Owned(Event::TestFail {
+                                path: path.clone(),
+                                name: name.clone(),
+                                duration_ms: *duration_ms,
+                                failure: Failure::Snapshot {
+                                    mismatches: failures
+                                        .into_iter()
+                                        .map(|failure| SnapshotMismatch {
+                                            key: failure.key,
+                                            detail: failure.detail,
+                                        })
+                                        .collect(),
+                                },
+                                origin: None,
+                            }),
+                            None => std::borrow::Cow::Borrowed(event),
                         }
                     }
-                    Event::TestFail { path, name, .. } => {
-                        failed_tests.insert(full_test_name(path, name));
-                    }
-                    _ => {}
-                }
-                // Failures are polished for human eyes before any consumer
-                // sees them: project paths become root-relative, lest's own
-                // frames drop out of traces (core takes the traceback, so
-                // `protectedCall`/`run` appeared in every single failure),
-                // and mlua's error framing is normalized. Here rather than in
-                // a backend so every backend and every reporter agree.
-                let event: std::borrow::Cow<Event> = match event {
+                    // Failures are polished for human eyes before any
+                    // consumer sees them: project paths become root-relative,
+                    // lest's own frames drop out of traces (core takes the
+                    // traceback, so `protectedCall`/`run` appeared in every
+                    // single failure), and mlua's error framing is
+                    // normalized. Here rather than in a backend so every
+                    // backend and every reporter agree. A test that failed on
+                    // its own keeps its real failure — any mismatches it also
+                    // produced stay in `pending` and surface after the tree.
                     Event::TestFail { .. } => {
                         let mut polished = event.clone();
                         if let Event::TestFail { failure, .. } = &mut polished {
@@ -894,20 +922,14 @@ pub fn run_suites_with(
             }
         };
 
-        // Reconcile the verdicts the event stream could not carry, *before*
-        // the synthesized run_end so every consumer sees the same counts.
-        // Snapshot comparison is host-side: a test whose snapshot mismatched
-        // streamed as a pass, and without this the summary said `passed`
-        // beside exit 1. Tests that also failed on their own are already
-        // counted and must not be double-flipped.
-        let suite_snapshot_failures = store.failures.len() - failures_before_suite;
-        if suite_snapshot_failures > 0 {
-            let flipped = snapshot_failed_tests.difference(&failed_tests).count() as u32;
-            suite_totals.passed = suite_totals.passed.saturating_sub(flipped);
-            suite_totals.failed += flipped;
-            totals.passed = totals.passed.saturating_sub(flipped);
-            totals.failed += flipped;
-            reporter.suite_snapshot_failures(suite_snapshot_failures);
+        // Mismatches whose owning test never streamed a verdict they could be
+        // folded into: the test failed on its own (its real failure was kept),
+        // or the backend died before the test's terminal event. Rare — routed
+        // to the fallback block after the tree so the diffs are never lost.
+        if !pending.is_empty() {
+            let mut orphaned: Vec<_> = pending.into_iter().collect();
+            orphaned.sort_by(|a, b| a.0.cmp(&b.0));
+            leftover.extend(orphaned.into_iter().flat_map(|(_, failures)| failures));
         }
         // A dead backend emitted no test_fail, so without this the suite
         // counted as passed in the very summary printed above the fatal
@@ -933,8 +955,9 @@ pub fn run_suites_with(
         }
     }
 
-    // Surface snapshot mismatch diffs before the summary.
-    for failure in &store.failures {
+    // Snapshot failures that could not be folded into their test's own
+    // failure block surface here, before the summary.
+    for failure in &leftover {
         reporter.snapshot_failure(&failure.spec, &failure.key, &failure.detail);
     }
     let snapshots = match store.finish() {

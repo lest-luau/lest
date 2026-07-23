@@ -129,6 +129,25 @@ pub enum Failure {
         #[serde(default)]
         trace: Option<String>,
     },
+    /// Host-synthesized: the framework only reports the *fact* of a snapshot
+    /// and cannot produce this variant — comparison lives CLI-side, and when
+    /// it fails, the host folds its verdict back into the test's result by
+    /// rewriting the streamed `test_pass` into a `test_fail` carrying this.
+    /// It therefore appears only in the merged output stream (JSON consumers
+    /// included), never on the framework wire, so the protocol stays v1.
+    Snapshot { mismatches: Vec<SnapshotMismatch> },
+}
+
+/// One mismatched `toMatchSnapshot` call inside a [`Failure::Snapshot`] — a
+/// test can hold several, so each carries its storage key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotMismatch {
+    /// The snapshot's storage key (`<describe path> > <test> <hint-or-counter>`).
+    pub key: String,
+    /// Already-rendered failure body: the stored-vs-received line diff, or
+    /// prose for a non-diff failure (a duplicate key's explanation).
+    pub detail: String,
 }
 
 /// Pass/fail/skip counts aggregated across every backend in a run.

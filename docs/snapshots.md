@@ -20,6 +20,18 @@ end)
 | Stored value differs | **Fails**, with a diff |
 | `lest -u` and it differs | Overwritten, and the test **passes** |
 
+A mismatch fails the test that produced it, like any other failure — the diff
+renders in the test's failure block, labeled with the snapshot's key (one test
+can hold several snapshots):
+
+```
+  ✗ renders the report (0.2ms)
+
+    Snapshot "renders the report 1" did not match:
+      - { status = "ok" }
+      + { status = "down" }
+```
+
 The first run is meant to pass — that's how the snapshot gets created. Which
 means **you have to review the file**: a snapshot committed without being read
 records whatever the code did that day, bug included.

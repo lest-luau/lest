@@ -253,6 +253,9 @@ pub fn polish_failure(failure: &mut Failure, root: &Path, core_entry: &Path) {
                 };
             }
         }
+        // Host-synthesized after polishing, from values the store already
+        // rendered — there are no paths or traces in a snapshot diff to clean.
+        Failure::Snapshot { .. } => {}
     }
 }
 

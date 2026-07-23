@@ -326,6 +326,9 @@ fn remap_failure(failure: &mut Failure, map: &bundle::SourceMap, root: &Path) {
                 *trace = remap_bundle_coordinates(trace, map, root);
             }
         }
+        // Never decoded from a task: the host synthesizes this variant after
+        // comparison, and a snapshot diff carries no bundle coordinates.
+        Failure::Snapshot { .. } => {}
     }
 }
 
