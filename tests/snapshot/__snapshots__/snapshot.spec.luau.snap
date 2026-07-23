@@ -1,0 +1,59 @@
+lest snapshot v1
+
+snapshot store > keys hinted snapshots by hint the named one 1
+{ role = "named" }
+
+snapshot store > keys repeated snapshots in one test distinctly 1 1
+"same value"
+
+snapshot store > keys repeated snapshots in one test distinctly 2 1
+"same value"
+
+snapshot store > nested suite path > inner > joins the describe path into the key 1 1
+"keyed by path"
+
+snapshot store > stores a shared table appearing twice without a cycle error 1 1
+{ left = { tag = "shared" }, right = { tag = "shared" } }
+
+snapshot store > stores arrays and mixed tables 1 1
+{ 1, 2, 3 }
+
+snapshot store > stores arrays and mixed tables 2 1
+{}
+
+snapshot store > stores arrays and mixed tables 3 1
+{ count = 2, list = { "a", "b" }, ok = true }
+
+snapshot store > stores deep nesting losslessly 1 1
+{ a = { b = { c = { d = { e = { f = "bottom" } } } } } }
+
+snapshot store > stores keys sorted, not in insertion order 1 1
+{ apple = 2, mango = 3, zebra = 1 }
+
+snapshot store > stores non-identifier and non-string keys in brackets 1 1
+{ [false] = "off", [10] = "ten", ["not an identifier"] = 1 }
+
+snapshot store > stores reference values as stable placeholders 1 1
+{ callback = <function> }
+
+snapshot store > stores scalars 1 1
+42
+
+snapshot store > stores scalars 2 1
+-1.5
+
+snapshot store > stores scalars 3 1
+true
+
+snapshot store > stores scalars 4 1
+nil
+
+snapshot store > stores strings with quoting and escapes 1 1
+"plain"
+
+snapshot store > stores strings with quoting and escapes 2 2
+"has \"quotes\" and a\
+newline	and tab"
+
+snapshot store > stores strings with quoting and escapes 3 1
+""
