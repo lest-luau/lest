@@ -18,7 +18,9 @@ pub use coverage::{CoverageData, FileCoverage};
 // beside the palette so the two-voice rule (see `pretty.rs`) is enforced in
 // one module. `render_warning` is the crate-wide way to emit a warning:
 // callers `eprint!` the result (warnings always belong on stderr).
-pub use diagnostic::{render_diagnostic, render_warning, sentence, warn_to_stderr, Severity};
+pub use diagnostic::{
+    note_to_stderr, render_diagnostic, render_warning, sentence, warn_to_stderr, Severity,
+};
 pub use event::{check_protocol_version, Event, Failure, Totals, PROTOCOL_VERSION};
 pub use json::Json;
 pub use junit::Junit;
