@@ -103,7 +103,7 @@ fn run_with_transport<T: Transport>(
         session.pin_place_version(version);
     }
 
-    // `settings.rojo`, consumed: string requires whose targets the project
+    // `[settings] rojo`, consumed: string requires whose targets the project
     // file maps into the place delegate to the engine's require instead of
     // silently bundling a private copy. Parsed once per suite; a missing or
     // malformed project file is a tool error, not a silent fall-back to
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(third.upload_count(), 1);
     }
 
-    /// `settings.rojo` travels config → plan → bundler: the script actually
+    /// `[settings] rojo` travels config → plan → bundler: the script actually
     /// submitted to Open Cloud carries the delegation for a mapped require.
     #[test]
     fn rojo_project_in_the_plan_reaches_the_bundler() {

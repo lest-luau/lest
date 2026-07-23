@@ -162,7 +162,7 @@ The bundle is self-contained, so an empty place works — but the place doesn't
 have to be empty. If yours is populated (a rojo-built place with fixtures as
 real ModuleScripts, say), there are two ways a spec reaches those modules.
 
-**With `settings.rojo` set** (the good way): point lest at your rojo project
+**With `[settings] rojo` set** (the good way): point lest at your rojo project
 file, and a plain string require of a mapped module is *delegated* to the
 place. The bundler sees that `../fixtures/recorder` maps to
 `ServerStorage.Fixtures.recorder`, skips bundling it, and the generated
@@ -193,7 +193,7 @@ Delegated requires — both kinds — go through the engine's native module cach
 so a spec and in-place code requiring the same ModuleScript get the same
 table: shared state and module identity survive, which no bundled copy of the
 module could guarantee. Beware the un-mapped middle ground: a string require
-of a module that also lives in the place, *without* `settings.rojo`, bundles a
+of a module that also lives in the place, *without* `[settings] rojo`, bundles a
 private copy with its own state.
 
 Two rules keep the boundary sharp:
