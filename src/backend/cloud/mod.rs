@@ -18,6 +18,8 @@
 pub mod api;
 pub mod bundle;
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::report::{check_protocol_version, Event};
@@ -89,6 +91,9 @@ fn run_with_transport<T: Transport>(
     // sharing the cache keeps that from re-reading the framework off disk once
     // per spec.
     let mut sources = bundle::SourceCache::default();
+    // …and shared modules re-report the same unresolvable require once per
+    // bundle, so warnings are deduplicated across the suite.
+    let mut warned: HashSet<bundle::UnresolvedRequire> = HashSet::new();
 
     for spec in &plan.specs {
         let name = display_rel(spec, &plan.root);
@@ -102,7 +107,13 @@ fn run_with_transport<T: Transport>(
             name_filter: plan.name_filter.as_deref(),
             deadline_ms,
         };
-        let script = bundle::bundle_with_cache(&input, &mut sources)?;
+        let bundle::Bundle { script, unresolved } =
+            bundle::bundle_with_cache(&input, &mut sources)?;
+        for miss in unresolved {
+            if warned.insert(miss.clone()) {
+                crate::report::warn_to_stderr(&unresolved_warning(&miss, &plan.root));
+            }
+        }
 
         let results = session.run_script(&script, overall)?;
         let events = extract_events(&results).ok_or_else(|| {
@@ -158,6 +169,22 @@ fn run_with_transport<T: Transport>(
 /// `output.results[0]` is the events array our entrypoint returned.
 fn extract_events(results: &[Value]) -> Option<Vec<Value>> {
     results.first().and_then(Value::as_array).cloned()
+}
+
+/// The warning body for a string require the bundler could not resolve: the
+/// real source position that the eventual in-engine error — a bundle
+/// coordinate — cannot carry. A warning rather than an error because the
+/// require may be legal dead code in the engine; the shim still errs loudly
+/// if it is reached.
+fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
+    format!(
+        "the string require of '{}' at {}:{} does not resolve ({}) and is not bundled — it \
+         will error if reached in the engine",
+        miss.spec,
+        display_rel(&miss.file, root),
+        miss.line,
+        miss.reason
+    )
 }
 
 /// Reads the Open Cloud API key from the environment. A missing key for a cloud
@@ -310,5 +337,26 @@ mod tests {
         let plan = plan_for(&root, root.join("tests/core/expect.spec.luau"));
         let err = resolve_target(&plan, &CloudTarget::default()).unwrap_err();
         assert!(err.to_string().contains("universe_id"), "{err}");
+    }
+
+    /// The warning carries what the eventual in-engine error cannot: the
+    /// requiring file (root-relative) and the call-site line.
+    #[test]
+    fn unresolved_warning_names_file_line_spec_and_reason() {
+        let root = repo_root();
+        let miss = bundle::UnresolvedRequire {
+            file: crate::resolve::normalize(&root.join("tests/engine/foo.spec.luau")),
+            line: 12,
+            spec: "src".to_string(),
+            reason: "no matching file on disk".to_string(),
+        };
+        let body = unresolved_warning(&miss, &root);
+        assert!(body.contains("'src'"), "{body}");
+        assert!(body.contains("foo.spec.luau:12"), "{body}");
+        assert!(body.contains("no matching file on disk"), "{body}");
+        assert!(
+            body.contains("will error if reached in the engine"),
+            "{body}"
+        );
     }
 }
