@@ -90,6 +90,13 @@ into one self-contained script, submits it as an Open Cloud **Luau execution
 task** against a real place, polls to completion, and decodes the collected
 events back into the same report.
 
+Each task boots a fresh Roblox **game server** for your place and runs the
+bundle as an ordinary server script: `RunService:IsServer()` is true,
+`IsClient()` and `IsStudio()` are false, and server-only services behave as
+they do in production. The studio backend runs the same suite in a different
+context — [Execution context](studio.md#execution-context) has the
+comparison.
+
 ```toml
 [suites.engine]
 include = ["tests/engine/**/*.spec.luau"]
@@ -231,9 +238,13 @@ Studio on your `[place] file` (or published place), and decodes the
 results from Studio's output file when it quits. What carries over from
 cloud: the same bundling, the same `[place] rojo` delegation, the same
 CLI-side snapshots, the same `[place]` configuration. What differs:
-everything runs locally, and every run pays a Studio boot (~15-45s). The
-studio backend refuses to run under `$CI`, and watch mode does not include
-it. Details and troubleshooting: **[Studio](studio.md)**.
+everything runs locally, every run pays a Studio boot (~15-45s), and the
+**execution context** — cloud runs specs on a real game server, studio runs
+them in an edit-mode session at the command bar's permission level, which
+matters the moment a spec asks `IsServer()` or touches DataStores
+([Execution context](studio.md#execution-context)). The studio backend
+refuses to run under `$CI`, and watch mode does not include it. Details and
+troubleshooting: **[Studio](studio.md)**.
 
 ## Overriding a backend
 

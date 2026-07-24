@@ -38,9 +38,59 @@ Honest costs, stated plainly:
   top of the per-spec timeouts.
 - The suite runs against the **place you configured** — a built place file
   or a published place — never an unsaved session you happen to have open.
-- Execution uses Studio's RunScript context: real engine APIs, real
-  Instances and services, but not a stepping Run-mode playtest.
+- Execution is Studio's **edit-mode** RunScript context: real engine APIs,
+  real Instances and services, but not a running server and not a stepping
+  playtest. See [Execution context](#execution-context) — cloud and studio
+  genuinely differ here.
 - Watch mode does not include studio suites (a boot per save is unusable).
+
+## Execution context
+
+The two engine backends run the same suite in genuinely different contexts,
+and code that asks *where* it is running gets different answers:
+
+|  | cloud | studio |
+| --- | --- | --- |
+| Runs as | A server script on a real game server | An edit-mode script, like the command bar |
+| Permission level | GameScript (an ordinary server script) | The command bar's (plugin-level APIs work) |
+| `RunService:IsStudio()` | `false` | `true` |
+| `RunService:IsServer()` | `true` | `true` |
+| `RunService:IsClient()` | `false` | `true` — an edit-mode quirk, see below |
+| `RunService:IsRunning()` | `false` | `false` |
+| `RunService:IsEdit()` | *throws* — plugin security | `true` |
+
+**cloud** boots a fresh Roblox game server for each task and runs the bundle
+as an ordinary server script. Server-only services behave as they do in
+production — this is a real server, not an emulation of one. (It is its own
+documented RunService context, though: Roblox's reference lists a "Luau
+Execution" row, with `IsRunning()` false.)
+
+**studio** executes in an *edit* session, at the same permission level as
+Studio's command bar. Nothing is simulating: place scripts don't run, physics
+doesn't step, and — an edit-mode quirk worth knowing — `IsClient()` **and**
+`IsServer()` both return `true`, because an edit session acts as both
+contexts at once. To tell the two backends apart, branch on
+`RunService:IsStudio()`, never on `IsClient()`/`IsServer()` — and not on
+`IsEdit()` either: it is a plugin-security method, so the same call that
+returns `true` under studio *throws* at cloud's server permission.
+
+In practice:
+
+- Specs that exercise Instances, services, and the DataModel behave the same
+  in both — which is what lets one engine suite run on studio locally and
+  cloud in CI.
+- **Server-only cloud services differ.** DataStores and friends work on cloud
+  as on any game server. Under studio they follow edit-mode rules: the place
+  must be *published* and have Studio API access enabled in Game Settings —
+  and a local `[place] file` can never reach them, since an unpublished file
+  has no universe to store into.
+- **Plugin-level APIs differ the other way.** The command bar's permission
+  level is higher than a game server's, so an API that requires plugin
+  security works under studio and errors under cloud.
+
+A spec that genuinely needs one context should branch on
+`RunService:IsStudio()` — or live in a suite that only ever runs on the
+backend that provides it.
 
 ## Choosing the place
 

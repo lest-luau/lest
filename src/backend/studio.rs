@@ -9,7 +9,10 @@
 //! bridge, no permission prompts. The costs, stated plainly: every run pays
 //! a Studio boot, the script executes against the *place file or published
 //! place* (never an unsaved open session), and execution is Studio's
-//! RunScript context rather than a stepping Run-mode playtest.
+//! *edit-mode* RunScript context — command-bar permission level, `IsEdit()`
+//! true, both `IsClient()` and `IsServer()` true, nothing stepping — not a
+//! game server (that's cloud) and not a playtest. The user-facing contrast
+//! lives in docs/studio.md ("Execution context").
 //!
 //! (An earlier warm-session design — a companion plugin, arm-and-press-Run —
 //! ran real playtests with ~1s dispatch; it was shelved for the zero-click
