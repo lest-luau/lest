@@ -105,9 +105,9 @@ pub fn run(
     std::fs::create_dir_all(&work_dir)
         .map_err(|e| ToolError(format!("cannot create {}: {e}", work_dir.display())))?;
     let script_path = work_dir.join("studio-run.luau");
-    // `.csv` because Studio requires that extension for `--outputFile`
-    // (hand-verified; the official docs' own `out.log` example is rejected).
-    let output_path = work_dir.join("studio-output.csv");
+    // `.log` because Studio requires that extension for `--outputFile`
+    // (hand-verified: "Output file must have a .log extension").
+    let output_path = work_dir.join("studio-output.log");
     std::fs::write(&script_path, &built.script)
         .map_err(|e| ToolError(format!("cannot write {}: {e}", script_path.display())))?;
     // A stale output file from an earlier run must never be decoded as this

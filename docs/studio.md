@@ -82,5 +82,5 @@ executable = "D:/Custom/RobloxStudioBeta.exe"
 - **"exited without completing"** — the bundle failed to load; the error
   points at the kept output file, and Studio's own output is usually the
   fastest diagnosis.
-- lest keeps `.lest/studio-run.luau` and `.lest/studio-output.csv` after a
+- lest keeps `.lest/studio-run.luau` and `.lest/studio-output.log` after a
   failure for inspection, and removes them after a success.
