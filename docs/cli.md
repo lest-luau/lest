@@ -201,7 +201,7 @@ being baked into whatever they expanded to that day.
 
 ```console
 $ lest studio install    # write the companion plugin into Roblox Studio's Plugins folder
-$ lest studio status     # installed version, port, and plugin-file state
+$ lest studio status     # install state, plus a live Studio session check
 $ lest studio uninstall  # remove the plugin (only if lest wrote it)
 ```
 
