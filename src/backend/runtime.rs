@@ -62,7 +62,7 @@ fn install_hint(runtime: Runtime) -> &'static str {
 /// What one line of runtime stdout turned out to be, with any text preceding
 /// the marker kept so it can still be shown.
 #[derive(Debug, PartialEq, Eq)]
-enum Decoded<'a> {
+pub(crate) enum Decoded<'a> {
     /// A spec-boundary marker carrying its (untrimmed) index text.
     SpecBoundary { leading: &'a str, index: &'a str },
     /// A protocol event carrying its JSON payload.
@@ -90,7 +90,7 @@ enum Decoded<'a> {
 /// the tail happened to parse as an index. On a tie at the same position the
 /// longer marker wins (the two differ within their first eight bytes, so a tie
 /// cannot actually occur — the rule is stated for whoever adds a third marker).
-fn classify(line: &str) -> Decoded<'_> {
+pub(crate) fn classify(line: &str) -> Decoded<'_> {
     let spec_at = line.find(SPEC_SENTINEL);
     let event_at = line.find(SENTINEL);
     match (spec_at, event_at) {
@@ -112,7 +112,7 @@ fn classify(line: &str) -> Decoded<'_> {
 
 /// Text preceding a marker is test output that arrived without its own newline;
 /// printing it keeps the passthrough contract intact.
-fn passthrough(leading: &str) {
+pub(crate) fn passthrough(leading: &str) {
     if !leading.is_empty() {
         println!("{leading}");
     }

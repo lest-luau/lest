@@ -6,6 +6,7 @@ use crate::report::{Event, Failure};
 pub mod cloud;
 pub mod native;
 pub mod runtime;
+pub mod studio;
 
 /// The sink a backend streams protocol events into. The first argument is the
 /// originating spec file when the backend can attribute it (always for native,

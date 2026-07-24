@@ -895,14 +895,17 @@ mod tests {
         let bundle = bundle(&input).expect("bundle should succeed");
         let script = bundle.script;
 
-        // The studio tail prints framed events and a done marker; nothing is
-        // returned and no collector is constructed.
+        // The studio tail prints framed events and a done marker; the cloud
+        // entrypoint (and its collector return) is absent. Matched on the
+        // entry banners: the embedded collector module's own doc comment
+        // legitimately contains collector-usage text in every bundle.
         assert!(script.contains(crate::backend::runtime::SENTINEL));
         assert!(script.contains(crate::backend::runtime::SPEC_SENTINEL));
         assert!(script.contains(crate::backend::runtime::DONE_SENTINEL));
         assert!(script.contains("JSONEncode(Sanitize.value(event))"));
-        assert!(!script.contains("return collector.events()"));
-        assert!(!script.contains("Collector.new()"));
+        assert!(script.contains("-- Entrypoint: stream each spec's events"));
+        assert!(!script.contains("-- Entrypoint: run each spec through the embedded collector"));
+        assert!(!script.ends_with("return collector.events()\n"));
         // Shared machinery is still there: scheduler deadline, name filter,
         // per-spec load, and the embedded runtime modules.
         assert!(script.contains("Scheduler.runSuite"));

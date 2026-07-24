@@ -17,6 +17,8 @@ pub enum BackendKind {
     Lune,
     Lute,
     Cloud,
+    /// A live Roblox Studio session, through the companion plugin.
+    Studio,
 }
 
 impl fmt::Display for BackendKind {
@@ -26,6 +28,7 @@ impl fmt::Display for BackendKind {
             BackendKind::Lune => "lune",
             BackendKind::Lute => "lute",
             BackendKind::Cloud => "cloud",
+            BackendKind::Studio => "studio",
         };
         f.write_str(name)
     }

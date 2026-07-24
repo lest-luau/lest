@@ -333,7 +333,10 @@ fn resolved_config_path(config: &Config, root: &Path) -> PathBuf {
 fn watchable(suites: Vec<Suite>) -> Vec<Suite> {
     suites
         .into_iter()
-        .filter(|suite| suite.backend != BackendKind::Cloud)
+        // Cloud is excluded by physics (network round-trips per save); studio
+        // is excluded until its watch integration lands — every re-run would
+        // demand a fresh Run press, which needs its own design (armed-on-save).
+        .filter(|suite| suite.backend != BackendKind::Cloud && suite.backend != BackendKind::Studio)
         .collect()
 }
 

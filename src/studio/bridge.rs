@@ -265,6 +265,260 @@ pub fn probe(port: u16, secret: &str, wait: Duration) -> Result<PingOutcome, Too
     Bridge::bind(port, secret)?.ping(wait)
 }
 
+/// How a run job ended, from the bridge's side of the wire.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunOutcome {
+    /// The plugin posted `/done`; `stopped` is whether it also managed to
+    /// stop the playtest (false means the user must press Stop).
+    Finished { stopped: bool },
+    /// Something polled with the wrong secret and nothing took the job.
+    RefusedSecret,
+    /// No plugin fetched the job in the fetch window.
+    NeverFetched,
+    /// The plugin fetched the job and refused it, with its reason.
+    Refused(String),
+    /// The plugin took the job but neither finished nor kept the budget.
+    Died,
+}
+
+/// Mutable state one run session threads through its connections.
+struct RunState {
+    fetched: bool,
+    /// The ack said `started = false`: the user must press Run.
+    needs_armed_notice: bool,
+    armed_reported: bool,
+    refused: Option<String>,
+    done: Option<bool>,
+}
+
+impl Bridge {
+    /// Serves one run job to completion: a plugin fetches the bundle on
+    /// `GET /job`, acks on `POST /result` (its `started` flag drives the
+    /// press-Run notice via `on_armed`), streams sentinel lines in
+    /// `POST /events` batches to `on_line`, and finishes with `POST /done`.
+    ///
+    /// `fetch_wait` bounds the wait for a session to take the job at all;
+    /// `run_budget` bounds everything after the fetch (arming, the user's
+    /// Run press, and the suite itself — the caller sizes it accordingly).
+    /// An `on_line` error aborts the run as a tool error.
+    pub fn run_suite(
+        &self,
+        bundle: &str,
+        fetch_wait: Duration,
+        run_budget: Duration,
+        on_line: &mut dyn FnMut(&str) -> Result<(), ToolError>,
+        on_armed: &mut dyn FnMut(),
+    ) -> Result<RunOutcome, ToolError> {
+        let job_id = format!("run-{}", super::generate_secret());
+        let job_body = serde_json::json!({
+            "id": job_id,
+            "kind": "run",
+            "bundle": bundle,
+            "markers": {
+                "event": crate::backend::runtime::SENTINEL,
+                "spec": crate::backend::runtime::SPEC_SENTINEL,
+                "done": crate::backend::runtime::DONE_SENTINEL,
+            },
+        })
+        .to_string();
+
+        let mut deadline = Instant::now() + fetch_wait;
+        let mut refused_secret = false;
+        let mut state = RunState {
+            fetched: false,
+            needs_armed_notice: false,
+            armed_reported: false,
+            refused: None,
+            done: None,
+        };
+
+        loop {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    let was_fetched = state.fetched;
+                    self.serve_run(
+                        stream,
+                        &job_id,
+                        &job_body,
+                        &mut state,
+                        &mut refused_secret,
+                        on_line,
+                    )?;
+                    if state.fetched && !was_fetched {
+                        // The job is out; the budget now covers arming, the
+                        // user's Run press, and the suite.
+                        deadline = Instant::now() + run_budget;
+                    }
+                    if state.needs_armed_notice && !state.armed_reported {
+                        // Exactly once, and only after an ack that said the
+                        // world is waiting on the user's Run press.
+                        state.armed_reported = true;
+                        on_armed();
+                    }
+                    if let Some(stopped) = state.done {
+                        return Ok(RunOutcome::Finished { stopped });
+                    }
+                    if let Some(reason) = state.refused.take() {
+                        return Ok(RunOutcome::Refused(reason));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(run_expired(&state, refused_secret));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Ok(run_expired(&state, refused_secret));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => {
+                    return Err(ToolError(format!("the bridge socket failed: {e}")));
+                }
+            }
+        }
+    }
+
+    /// Handles one connection of a run session.
+    fn serve_run(
+        &self,
+        mut stream: TcpStream,
+        job_id: &str,
+        job_body: &str,
+        state: &mut RunState,
+        refused_secret: &mut bool,
+        on_line: &mut dyn FnMut(&str) -> Result<(), ToolError>,
+    ) -> Result<(), ToolError> {
+        if stream.set_nonblocking(false).is_err() {
+            return Ok(());
+        }
+        if stream.set_read_timeout(Some(STREAM_TIMEOUT)).is_err()
+            || stream.set_write_timeout(Some(STREAM_TIMEOUT)).is_err()
+        {
+            return Ok(());
+        }
+
+        let request = match read_request(&mut stream, Instant::now() + CONNECTION_BUDGET) {
+            Some(request) => request,
+            None => {
+                respond(&mut stream, "400 Bad Request", None);
+                return Ok(());
+            }
+        };
+
+        if request.header("x-lest-secret") != Some(self.secret.as_str()) {
+            *refused_secret = true;
+            respond(&mut stream, "403 Forbidden", None);
+            return Ok(());
+        }
+
+        match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/job") => {
+                if state.fetched {
+                    respond(&mut stream, "204 No Content", None);
+                } else {
+                    state.fetched = true;
+                    respond(&mut stream, "200 OK", Some(job_body));
+                }
+                Ok(())
+            }
+            ("POST", "/result") => {
+                let Some(value) = decode_for(&mut stream, &request, job_id) else {
+                    return Ok(());
+                };
+                if value.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                    // started=false (or absent) means the world waits on the
+                    // user's Run press; the caller prints that notice once.
+                    if value.get("started").and_then(|v| v.as_bool()) != Some(true) {
+                        state.needs_armed_notice = true;
+                    }
+                } else {
+                    state.refused = Some(
+                        value
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(no reason given)")
+                            .to_string(),
+                    );
+                    // A refusal is terminal; suppress the armed notice.
+                    state.armed_reported = true;
+                }
+                respond(&mut stream, "200 OK", None);
+                Ok(())
+            }
+            ("POST", "/events") => {
+                let Some(value) = decode_for(&mut stream, &request, job_id) else {
+                    return Ok(());
+                };
+                respond(&mut stream, "200 OK", None);
+                if let Some(lines) = value.get("lines").and_then(|v| v.as_array()) {
+                    for line in lines {
+                        if let Some(text) = line.as_str() {
+                            on_line(text)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ("POST", "/done") => {
+                let Some(value) = decode_for(&mut stream, &request, job_id) else {
+                    return Ok(());
+                };
+                state.done = Some(
+                    value
+                        .get("stopped")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                );
+                respond(&mut stream, "200 OK", None);
+                Ok(())
+            }
+            _ => {
+                respond(&mut stream, "404 Not Found", None);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Decodes a JSON body and checks its `id` addresses this job; answers the
+/// wire (400) and yields `None` otherwise.
+fn decode_for(
+    stream: &mut TcpStream,
+    request: &Request,
+    job_id: &str,
+) -> Option<serde_json::Value> {
+    let value: serde_json::Value = match serde_json::from_slice(&request.body) {
+        Ok(value) => value,
+        Err(_) => {
+            respond(stream, "400 Bad Request", None);
+            return None;
+        }
+    };
+    if value.get("id").and_then(|v| v.as_str()) != Some(job_id) {
+        respond(stream, "400 Bad Request", None);
+        return None;
+    }
+    Some(value)
+}
+
+/// The outcome when a run window closes without `/done`.
+fn run_expired(state: &RunState, refused_secret: bool) -> RunOutcome {
+    if state.fetched {
+        RunOutcome::Died
+    } else if refused_secret {
+        RunOutcome::RefusedSecret
+    } else {
+        RunOutcome::NeverFetched
+    }
+}
+
 /// Shapes a `/result` value into a report, tolerating missing fields: a
 /// plugin that answered at all is a live session even if a field is absent.
 fn ping_report(value: &serde_json::Value) -> PingReport {
@@ -682,6 +936,193 @@ mod tests {
         let outcome = bridge.ping(Duration::from_millis(1500)).expect("ping");
         prober.join().expect("prober");
         assert_eq!(outcome, PingOutcome::Silent);
+    }
+
+    fn post_json(port: u16, secret: &str, path: &str, body: &str) -> String {
+        request(
+            port,
+            &format!(
+                "POST {path} HTTP/1.1\r\nx-lest-secret: {secret}\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    /// Runs `run_suite` on a thread with collected lines/armed notices, so
+    /// the test body plays the plugin synchronously.
+    fn spawn_run(
+        bridge: Bridge,
+        fetch_wait: Duration,
+        run_budget: Duration,
+    ) -> std::thread::JoinHandle<(Result<RunOutcome, ToolError>, Vec<String>, usize)> {
+        std::thread::spawn(move || {
+            let mut lines = Vec::new();
+            let mut armed = 0usize;
+            let outcome = bridge.run_suite(
+                "THE BUNDLE",
+                fetch_wait,
+                run_budget,
+                &mut |line| {
+                    lines.push(line.to_string());
+                    Ok(())
+                },
+                &mut || armed += 1,
+            );
+            (outcome, lines, armed)
+        })
+    }
+
+    #[test]
+    fn run_round_trip_streams_lines_and_finishes() {
+        let bridge = Bridge::bind(0, "s3cret").expect("bind");
+        let port = bridge.port();
+        let server = spawn_run(bridge, Duration::from_secs(5), Duration::from_secs(5));
+
+        // Poll like the plugin until the job appears.
+        let job: serde_json::Value = loop {
+            let response = get_job(port, "s3cret");
+            if response.starts_with("HTTP/1.1 200") {
+                let body = response.split("\r\n\r\n").nth(1).expect("body");
+                break serde_json::from_str(body).expect("job json");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(job["kind"], "run");
+        assert_eq!(job["bundle"], "THE BUNDLE");
+        assert_eq!(job["markers"]["event"], crate::backend::runtime::SENTINEL);
+        let id = job["id"].as_str().expect("id");
+
+        post_json(
+            port,
+            "s3cret",
+            "/result",
+            &format!(r#"{{"id":"{id}","ok":true,"started":false}}"#),
+        );
+        post_json(
+            port,
+            "s3cret",
+            "/events",
+            &format!(r#"{{"id":"{id}","lines":["a-line","b-line"]}}"#),
+        );
+        post_json(
+            port,
+            "s3cret",
+            "/done",
+            &format!(r#"{{"id":"{id}","ok":true,"stopped":true}}"#),
+        );
+
+        let (outcome, lines, armed) = server.join().expect("server");
+        assert_eq!(
+            outcome.expect("run"),
+            RunOutcome::Finished { stopped: true }
+        );
+        assert_eq!(lines, vec!["a-line".to_string(), "b-line".to_string()]);
+        // started=false earns exactly one press-Run notice.
+        assert_eq!(armed, 1);
+    }
+
+    #[test]
+    fn a_started_ack_skips_the_armed_notice() {
+        let bridge = Bridge::bind(0, "s3cret").expect("bind");
+        let port = bridge.port();
+        let server = spawn_run(bridge, Duration::from_secs(5), Duration::from_secs(5));
+
+        let job: serde_json::Value = loop {
+            let response = get_job(port, "s3cret");
+            if response.starts_with("HTTP/1.1 200") {
+                let body = response.split("\r\n\r\n").nth(1).expect("body");
+                break serde_json::from_str(body).expect("job json");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let id = job["id"].as_str().expect("id");
+        post_json(
+            port,
+            "s3cret",
+            "/result",
+            &format!(r#"{{"id":"{id}","ok":true,"started":true}}"#),
+        );
+        post_json(
+            port,
+            "s3cret",
+            "/done",
+            &format!(r#"{{"id":"{id}","ok":true,"stopped":false}}"#),
+        );
+
+        let (outcome, _, armed) = server.join().expect("server");
+        assert_eq!(
+            outcome.expect("run"),
+            RunOutcome::Finished { stopped: false }
+        );
+        assert_eq!(armed, 0);
+    }
+
+    #[test]
+    fn a_plugin_refusal_is_reported_with_its_reason() {
+        let bridge = Bridge::bind(0, "s3cret").expect("bind");
+        let port = bridge.port();
+        let server = spawn_run(bridge, Duration::from_secs(5), Duration::from_secs(5));
+
+        let job: serde_json::Value = loop {
+            let response = get_job(port, "s3cret");
+            if response.starts_with("HTTP/1.1 200") {
+                let body = response.split("\r\n\r\n").nth(1).expect("body");
+                break serde_json::from_str(body).expect("job json");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let id = job["id"].as_str().expect("id");
+        post_json(
+            port,
+            "s3cret",
+            "/result",
+            &format!(r#"{{"id":"{id}","ok":false,"error":"a run is already in progress"}}"#),
+        );
+
+        let (outcome, _, armed) = server.join().expect("server");
+        assert_eq!(
+            outcome.expect("run"),
+            RunOutcome::Refused("a run is already in progress".to_string())
+        );
+        assert_eq!(armed, 0);
+    }
+
+    #[test]
+    fn an_unfetched_job_expires_as_never_fetched() {
+        let bridge = Bridge::bind(0, "s").expect("bind");
+        let server = spawn_run(bridge, Duration::from_millis(100), Duration::from_secs(5));
+        let (outcome, _, _) = server.join().expect("server");
+        assert_eq!(outcome.expect("run"), RunOutcome::NeverFetched);
+    }
+
+    #[test]
+    fn a_fetched_job_that_goes_quiet_expires_as_died() {
+        let bridge = Bridge::bind(0, "s3cret").expect("bind");
+        let port = bridge.port();
+        let server = spawn_run(bridge, Duration::from_secs(5), Duration::from_millis(400));
+
+        loop {
+            let response = get_job(port, "s3cret");
+            if response.starts_with("HTTP/1.1 200") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (outcome, _, _) = server.join().expect("server");
+        assert_eq!(outcome.expect("run"), RunOutcome::Died);
+    }
+
+    #[test]
+    fn a_wrong_secret_run_window_reports_refused_secret() {
+        let bridge = Bridge::bind(0, "right").expect("bind");
+        let port = bridge.port();
+        let server = spawn_run(bridge, Duration::from_millis(800), Duration::from_secs(5));
+
+        let response = get_job(port, "wrong");
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+
+        let (outcome, _, _) = server.join().expect("server");
+        assert_eq!(outcome.expect("run"), RunOutcome::RefusedSecret);
     }
 
     #[test]

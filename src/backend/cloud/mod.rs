@@ -216,7 +216,7 @@ fn extract_events(results: &[Value]) -> Option<Vec<Value>> {
 /// coordinate — cannot carry. A warning rather than an error because the
 /// require may be legal dead code in the engine; the shim still errs loudly
 /// if it is reached.
-fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
+pub(crate) fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
     format!(
         "the string require of '{}' at {}:{} does not resolve ({}) and is not bundled — it \
          will error if reached in the engine",

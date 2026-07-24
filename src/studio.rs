@@ -608,6 +608,20 @@ pub fn status() -> Result<(), ToolError> {
     Ok(())
 }
 
+/// The installed bridge credentials, for the studio backend. Not being
+/// installed is a tool error with the fix in it — the backend cannot invent
+/// a port and secret the plugin does not share.
+pub(crate) fn credentials() -> Result<(u16, String), ToolError> {
+    let stamp = read_stamp(&stamp_file()?).ok_or_else(|| {
+        ToolError(
+            "the studio backend needs the companion plugin — run `lest studio install`, open \
+             your place in Studio, and re-run"
+                .into(),
+        )
+    })?;
+    Ok((stamp.port, stamp.secret))
+}
+
 /// The version-handshake note for a live session: a running plugin that does
 /// not match this binary gets explicit re-install and restart instructions,
 /// never a silent skew. `None` when versions agree.
