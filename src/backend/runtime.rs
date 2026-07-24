@@ -30,16 +30,16 @@ use crate::resolve::Runtime;
 use crate::backend::{display_rel, require_string, EventSink, SuitePlan};
 use crate::error::ToolError;
 
-// `pub(crate)`: the studio backend frames its LogService relay with the same
+// `pub(crate)`: the studio backend frames its output file with the same
 // markers, so the decode path is shared rather than duplicated.
 pub(crate) const SENTINEL: &str = "@@LEST@@";
 pub(crate) const SPEC_SENTINEL: &str = "@@LEST_SPEC@@";
-/// The studio run's terminal marker: printed once after the last spec so the
-/// plugin knows the suite finished without waiting for a process exit (the
-/// signal the spawned runtimes get for free). `classify` never sees it — the
-/// studio path drops done-framed lines before classifying — and the studio
-/// side applies its own first-marker-wins rule against the event marker, so
-/// a payload containing this text cannot forge completion.
+/// The studio run's terminal marker: printed once after the last spec so
+/// the CLI can tell a completed suite from one whose Studio process merely
+/// exited (a GUI quit proves far less than a CLI runtime's exit does).
+/// `classify` never sees it — the studio path drops done-framed lines
+/// before classifying, using its own first-marker-wins rule, so a payload
+/// containing this text cannot forge completion.
 pub(crate) const DONE_SENTINEL: &str = "@@LEST_STUDIO_DONE@@";
 const HARNESS_TEMPLATE: &str = include_str!("../../luau/runtime/harness.luau");
 

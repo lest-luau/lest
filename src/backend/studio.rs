@@ -26,7 +26,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::backend::cloud::bundle::{self, BundleInput, Head, SpecEntry};
-use crate::backend::runtime::{classify, passthrough, Decoded, DONE_SENTINEL, SENTINEL};
+use crate::backend::runtime::{
+    classify, passthrough, Decoded, DONE_SENTINEL, SENTINEL, SPEC_SENTINEL,
+};
 use crate::backend::{display_rel, EventSink, SuitePlan};
 use crate::config::CloudTarget;
 use crate::error::ToolError;
@@ -135,14 +137,14 @@ pub fn run(
     let deadline = Instant::now()
         .checked_add(overall)
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
-    let timed_out = loop {
+    let (timed_out, exit_status) = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break false,
+            Ok(Some(status)) => break (false, Some(status)),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break true;
+                    break (true, None);
                 }
                 std::thread::sleep(WAIT_POLL);
             }
@@ -153,21 +155,56 @@ pub fn run(
         }
     };
 
+    let status_text = exit_status
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "killed".into());
     // Decode whatever made it to disk — on a timeout the partial file still
     // holds every event Studio flushed, and discarding streamed outcomes
     // behind an error would hide everything that already ran.
-    let contents = std::fs::read_to_string(&output_path).unwrap_or_default();
-    let mut decoder = LineDecoder::new(plan);
-    let mut done_seen = false;
-    for line in contents.lines() {
-        if is_done_framed(line) {
-            done_seen = true;
+    let contents = match std::fs::read_to_string(&output_path) {
+        Ok(text) => text,
+        Err(_) if timed_out => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ToolError(format!(
+                "Studio exited ({status_text}) without ever writing its output file — the \
+                 launch likely failed before the place loaded"
+            )));
         }
-        decoder.feed(line, on_event)?;
+        Err(e) => {
+            return Err(ToolError(format!(
+                "cannot read {}: {e}",
+                output_path.display()
+            )));
+        }
+    };
+    // The done marker, not the process exit, is the completion authority: a
+    // Studio that finished the suite and then wedged on quit must not turn
+    // an all-green run red.
+    let lines: Vec<&str> = contents.lines().collect();
+    let done_seen = lines.iter().any(|line| is_done_framed(line));
+    let mut decoder = LineDecoder::new(plan);
+    for (index, line) in lines.iter().enumerate() {
+        match decoder.feed(line, on_event) {
+            Ok(()) => {}
+            Err(_) if !done_seen && index + 1 == lines.len() => {
+                // A torn final write is expected of a run that never
+                // completed (the kill or crash landed mid-line); echoing it
+                // beats discarding every outcome behind an exit 2. A
+                // mid-stream undecodable line, or any on a completed run,
+                // stays a hard error.
+                println!("{line}");
+            }
+            Err(e) => return Err(e),
+        }
     }
-    let (outcomes, _saw_protocol, current_spec) = decoder.into_parts();
+    let (outcomes, saw_protocol, current_spec) = decoder.into_parts();
 
-    if timed_out {
+    if timed_out && done_seen {
+        crate::report::note_to_stderr(
+            "the suite completed but Studio had to be closed at the budget",
+        );
+    }
+    if timed_out && !done_seen {
         // A hang inside the suite is a test failure (exit 1), matching the
         // other backends' budget expiries.
         let spec = current_spec.map(|i| plan.specs[i].as_path());
@@ -193,11 +230,19 @@ pub fn run(
         return Ok(());
     }
 
-    if !done_seen {
+    if !timed_out && !done_seen {
         if outcomes == 0 {
+            if saw_protocol {
+                return Err(ToolError(format!(
+                    "Studio ({status_text}) died mid-suite before any test finished in \
+                     \"{}\" — output kept at {}",
+                    plan.name,
+                    output_path.display()
+                )));
+            }
             return Err(ToolError(format!(
-                "Studio exited without completing suite \"{}\" — the bundle likely failed to \
-                 load; its output (if any) is kept at {}",
+                "Studio exited ({status_text}) without running suite \"{}\" — the launch or \
+                 the bundle load failed; output kept at {}",
                 plan.name,
                 output_path.display()
             )));
@@ -357,7 +402,7 @@ fn studio_executable(explicit: Option<&Path>) -> Result<PathBuf, ToolError> {
 fn newest_studio_exe(versions: &Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(versions).ok()? {
-        let entry = entry.ok()?;
+        let Ok(entry) = entry else { continue };
         let exe = entry.path().join("RobloxStudioBeta.exe");
         if exe.is_file() {
             let modified = entry
@@ -379,9 +424,13 @@ fn newest_studio_exe(versions: &Path) -> Option<PathBuf> {
 fn is_done_framed(line: &str) -> bool {
     match line.find(DONE_SENTINEL) {
         None => false,
-        Some(done_at) => line
-            .find(SENTINEL)
-            .is_none_or(|event_at| done_at < event_at),
+        Some(done_at) => {
+            let framing = [line.find(SENTINEL), line.find(SPEC_SENTINEL)]
+                .into_iter()
+                .flatten()
+                .min();
+            framing.is_none_or(|other_at| done_at < other_at)
+        }
     }
 }
 

@@ -87,7 +87,7 @@ Watch mode is graph-driven, not glob-driven. Saving a file invalidates its
 content hash; the inverted require graph then yields exactly the specs whose
 transitive requires touched it, and only those re-run. Watching is debounced,
 hidden files are ignored (except `.luaurc`, which affects resolution), and
-`cloud` suites are always excluded — the fast loop never waits on the network.
+`cloud` and `studio` suites are always excluded — the fast loop never waits on a network round-trip or a Studio boot.
 
 At startup and after every pass, a dim banner marks the loop as alive:
 

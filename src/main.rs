@@ -1023,7 +1023,7 @@ pub fn select_suites(
         config
             .suites
             .iter()
-            .filter(|suite| suite.default_enabled || ci)
+            .filter(|suite| suite.default_enabled || (ci && suite.backend != BackendKind::Studio))
             .cloned()
             .collect()
     } else {

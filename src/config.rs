@@ -130,7 +130,8 @@ pub struct Suite {
     /// CI is detected.
     pub default_enabled: bool,
     /// Per-suite Open Cloud overrides; falls back to the top-level `[cloud]`
-    /// block when a field is unset. Only consulted for cloud-backend suites.
+    /// block when a field is unset. Consulted by the cloud backend and, for
+    /// its place selection, the studio backend.
     pub cloud: CloudTarget,
 }
 

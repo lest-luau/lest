@@ -138,10 +138,10 @@ pub enum Head {
     /// Open Cloud task: events buffer in the embedded collector and the task
     /// returns them as JSON (`output.results[0]`).
     Cloud,
-    /// Studio playtest: events stream as sentinel-framed `print` lines (the
-    /// spawned-runtime framing), captured from LogService by the companion
-    /// plugin and relayed to the CLI bridge live. A done marker after the
-    /// last spec replaces the process exit spawned runtimes signal with.
+    /// Launched Studio run: events print as sentinel-framed lines into the
+    /// output file `--task RunScript` writes, decoded by the CLI afterward.
+    /// A done marker after the last spec is the completion authority — a
+    /// GUI quit is a weaker signal than a process exit.
     Studio,
 }
 
