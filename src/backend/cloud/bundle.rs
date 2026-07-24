@@ -130,11 +130,23 @@ fn brief_reason(error: &ResolveError) -> String {
     }
 }
 
+/// Which entrypoint tail the bundle ends with. The module factories, require
+/// shim, and source map are identical for every consumer; only the code that
+/// *drives* the suite differs per execution environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Head {
+    /// Open Cloud task: events buffer in the embedded collector and the task
+    /// returns them as JSON (`output.results[0]`).
+    Cloud,
+}
+
 /// Everything the bundler needs to emit one self-contained entrypoint.
 pub struct BundleInput<'a> {
     pub core_entry: &'a Path,
     pub specs: &'a [SpecEntry],
     pub name_filter: Option<&'a str>,
+    /// The entrypoint tail to emit; see [`Head`].
+    pub head: Head,
     /// Per-spec scheduler deadline inside the engine, in milliseconds.
     pub deadline_ms: u64,
     /// The rojo project mapping (`[settings] rojo`), when configured. A string
@@ -318,7 +330,37 @@ pub fn bundle_with_cache(
 
     // ── Entrypoint ──────────────────────────────────────────────────────────
     let core_id = module_id(&core)?;
+    match input.head {
+        Head::Cloud => emit_cloud_head(&mut out, input, &core_id, &id_of)?,
+    }
 
+    Ok(Bundle {
+        script: out,
+        unresolved,
+        source_map,
+    })
+}
+
+/// The Open Cloud entrypoint tail: drive every spec through the embedded
+/// collector and scheduler, then return the buffered events as the task
+/// result. Appended after every module factory, so none of these lines carry
+/// source-map entries (scaffolding belongs to no module).
+fn emit_cloud_head(
+    out: &mut String,
+    input: &BundleInput,
+    core_id: &str,
+    id_of: &BTreeMap<PathBuf, String>,
+) -> Result<(), ToolError> {
+    // The same lookup `bundle_with_cache` uses; a spec missing from its own
+    // closure is a bundler bug surfaced as a tool error, not a panic.
+    let module_id = |path: &Path| -> Result<String, ToolError> {
+        id_of.get(&normalize(path)).cloned().ok_or_else(|| {
+            ToolError(format!(
+                "cannot bundle {} for the cloud suite: it is not in the computed require closure",
+                path.display()
+            ))
+        })
+    };
     out.push_str(
         "-- Entrypoint: run each spec through the embedded collector, return its events.\n",
     );
@@ -386,11 +428,7 @@ return collector.events()
         deadline = input.deadline_ms,
     ));
 
-    Ok(Bundle {
-        script: out,
-        unresolved,
-        source_map,
-    })
+    Ok(())
 }
 
 /// One module of the CLI-embedded in-engine runtime.
@@ -753,6 +791,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 30000,
             place: None,
         };
@@ -807,6 +846,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 30000,
             place: None,
         };
@@ -901,6 +941,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -953,6 +994,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: Some(&place),
         };
@@ -993,6 +1035,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: Some(&place),
         };
@@ -1089,6 +1132,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1134,6 +1178,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1181,6 +1226,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1214,6 +1260,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: Some("adds numbers"),
+            head: Head::Cloud,
             deadline_ms: 5000,
             place: None,
         };

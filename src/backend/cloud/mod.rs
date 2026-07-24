@@ -31,7 +31,7 @@ use crate::config::CloudTarget;
 use crate::error::ToolError;
 
 use api::{Session, Transport, UreqTransport};
-use bundle::{BundleInput, SpecEntry};
+use bundle::{BundleInput, Head, SpecEntry};
 
 /// Environment variables holding the Open Cloud API key, in priority order.
 /// The key is a secret: read only from the environment, never config or logs.
@@ -135,6 +135,7 @@ fn run_with_transport<T: Transport>(
             core_entry: &plan.core_entry,
             specs: &specs,
             name_filter: plan.name_filter.as_deref(),
+            head: Head::Cloud,
             deadline_ms,
             place: place_map.as_ref(),
         };
@@ -552,6 +553,7 @@ mod tests {
             core_entry: &plan.core_entry,
             specs: &specs,
             name_filter: None,
+            head: bundle::Head::Cloud,
             deadline_ms: 1,
             place: None,
         };
