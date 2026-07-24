@@ -459,6 +459,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: None,
+            studio_executable: None,
         }
     }
 
@@ -691,6 +692,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: None,
+            studio_executable: None,
         };
         let mut sink = |_: Option<&Path>, _: &Event| {};
 
@@ -751,6 +753,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: Some(root.join("default.project.json")),
+            studio_executable: None,
         };
         let transport = RoutedCloud::new();
         let mut sink = |_: Option<&Path>, _: &Event| {};

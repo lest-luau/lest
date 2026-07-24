@@ -16,13 +16,6 @@ include = ["tests/coverage/**/*.spec.luau"]
 [suites.snapshot]
 include = ["tests/snapshot/**/*.spec.luau"]
 
-# The Studio companion plugin's brain (luau/studio/bridge.luau) is pure Luau
-# with every engine dependency injected, so its behavior — polling, backoff,
-# warnings, job answers — runs on the native backend against scripted fakes.
-# No Studio involved; the engine-global entry script is not under test here.
-[suites.studio-plugin]
-include = ["tests/studio/**/*.spec.luau"]
-
 # Specs that need real runtime APIs run inside spawned runtime processes —
 # one harness seam, two runtimes.
 [suites.lune-runtime]

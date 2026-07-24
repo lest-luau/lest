@@ -1,20 +1,29 @@
-//! The studio backend: runs a suite in a live Roblox Studio session.
+//! The studio backend: Roblox Studio as a spawned runtime.
 //!
-//! The same bundle machinery as cloud (module factories, rojo delegation,
-//! source map) with the studio head: events leave the playtest as
-//! sentinel-framed print lines, the companion plugin relays them over the
-//! loopback bridge, and this module decodes them with the spawned-runtime
-//! decoder. The hand-verified platform reality shapes the flow: the CLI
-//! cannot start a playtest itself (the Run() API is a no-op), so the plugin
-//! arms the suite, attempts the start anyway, and the user's Run press is
-//! the expected trigger — the CLI waits, saying so.
+//! Studio's official CLI runs a script after a place loads
+//! (`--task RunScript --runScriptFile … --outputFile … --quitAfterExecution`),
+//! which makes the whole backend symmetric with lune/lute: bundle the suite
+//! (the same cloud bundler, with the studio head printing sentinel-framed
+//! events), launch Studio on the configured place, wait, decode the output
+//! file with the spawned-runtime decoder. Zero interaction — no plugin, no
+//! bridge, no permission prompts. The costs, stated plainly: every run pays
+//! a Studio boot, the script executes against the *place file or published
+//! place* (never an unsaved open session), and execution is Studio's
+//! RunScript context rather than a stepping Run-mode playtest.
 //!
-//! Never a CI backend: engine suites in CI belong on cloud. The guard here
-//! is loud so a misconfigured pipeline cannot hang waiting for a Studio
-//! that will never exist.
+//! (An earlier warm-session design — a companion plugin, arm-and-press-Run —
+//! ran real playtests with ~1s dispatch; it was shelved for the zero-click
+//! model. The archived design lives in the repo's working notes.)
+//!
+//! Never a CI backend: Studio is a GUI application with a login; engine
+//! suites in CI belong on cloud. The guard is loud so a misconfigured
+//! pipeline cannot hang on a Studio that will never exist.
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::backend::cloud::bundle::{self, BundleInput, Head, SpecEntry};
 use crate::backend::runtime::{classify, passthrough, Decoded, DONE_SENTINEL, SENTINEL};
@@ -22,21 +31,14 @@ use crate::backend::{display_rel, EventSink, SuitePlan};
 use crate::config::CloudTarget;
 use crate::error::ToolError;
 use crate::report::{check_protocol_version, Event, Failure};
-use crate::studio::bridge::{Bridge, PingOutcome, RunOutcome};
 
-/// How long the pre-run ping waits for a session to identify itself. The
-/// plugin's idle poll ceiling is 2s; the margin covers a poll mid-flight
-/// and one suspect-widened gap.
-const SESSION_WAIT: Duration = Duration::from_secs(4);
+/// Fixed allowance for Studio to boot and load the place, on top of the
+/// per-spec budgets. Boots are machine- and place-dependent; generous
+/// beats a race.
+const BOOT_ALLOWANCE: Duration = Duration::from_secs(180);
 
-/// How long a bound bridge waits for the identified session to fetch the
-/// run job. Short: the ping already proved a plugin is polling.
-const FETCH_WAIT: Duration = Duration::from_secs(10);
-
-/// Fixed allowance for arming plus the human Run press, on top of the
-/// per-spec budgets. Generous on purpose: the CLI says it is waiting, and a
-/// user who wandered off deserves better than a race against a stopwatch.
-const PRESS_RUN_ALLOWANCE: Duration = Duration::from_secs(120);
+/// How often the child process is polled for exit.
+const WAIT_POLL: Duration = Duration::from_millis(250);
 
 pub fn run(
     plan: &SuitePlan,
@@ -45,12 +47,14 @@ pub fn run(
 ) -> Result<(), ToolError> {
     if crate::is_ci() {
         return Err(ToolError(
-            "the studio backend needs a live Studio session and cannot run in CI — engine \
+            "the studio backend launches the Studio application and cannot run in CI — engine \
              suites in CI belong on the cloud backend"
                 .into(),
         ));
     }
-    let (port, secret) = crate::studio::credentials()?;
+
+    let exe = studio_executable(plan.studio_executable.as_deref())?;
+    let place = place_source(target, &plan.root)?;
 
     let entries: Vec<SpecEntry> = plan
         .specs
@@ -62,7 +66,7 @@ pub fn run(
         .collect();
 
     // `[settings] rojo`, honored exactly as the cloud backend honors it: the
-    // suite runs against the open place, so mapped requires delegate to it.
+    // launched place is the one mapped requires delegate into.
     let place_map = match &plan.rojo_project {
         Some(project) => Some(
             crate::resolve::VirtualDataModel::from_project_file(project)
@@ -71,8 +75,8 @@ pub fn run(
         None => None,
     };
 
-    // Per-spec in-engine deadline: the cloud rule (single-spec budget plus
-    // fixed slack), for the cloud reasons — the engine cannot preempt.
+    // Per-spec deadline: the cloud rule (single-spec budget plus fixed
+    // slack), for the cloud reasons — the engine cannot preempt.
     let budget = plan.timeout.saturating_add(Duration::from_secs(10));
     let deadline_ms = u64::try_from(budget.as_millis().max(1)).unwrap_or(u64::MAX);
 
@@ -84,9 +88,6 @@ pub fn run(
         deadline_ms,
         place: place_map.as_ref(),
     };
-    // One bundle per run (all specs share it), so the cache's cross-bundle
-    // reuse buys nothing here — it exists because `bundle_with_cache` is the
-    // one production entry point.
     let mut sources = bundle::SourceCache::default();
     let built = bundle::bundle_with_cache(&input, &mut sources)?;
     let mut warned: HashSet<bundle::UnresolvedRequire> = HashSet::new();
@@ -98,145 +99,283 @@ pub fn run(
         }
     }
 
-    let bridge = Bridge::bind(port, &secret)?;
-
-    // Identify the session before arming anything: the ping answer carries
-    // the place and plugin version, which is what makes a wrong-place run a
-    // warning up front instead of a mystery of failing delegated requires,
-    // and version skew an instruction instead of a silent difference.
-    match bridge.ping(SESSION_WAIT)? {
-        PingOutcome::Session(session) => {
-            if let Some(note) = crate::studio::version_note(&session.plugin_version) {
-                crate::report::warn_to_stderr(&note);
-            }
-            if let (Some(expected), Some(actual)) = (&target.place_id, session.place_id) {
-                if expected != &actual.to_string() {
-                    crate::report::warn_to_stderr(&format!(
-                        "the open Studio place ({} — id {actual}) is not this suite's \
-                         configured place_id {expected}; mapped requires may not resolve",
-                        session.place_name
-                    ));
-                }
-            }
-        }
-        PingOutcome::RefusedSecret => {
-            return Err(ToolError(
-                "a Studio plugin answered with a mismatched install — run `lest studio \
-                 install`, restart Studio, and re-run"
-                    .into(),
-            ));
-        }
-        PingOutcome::Silent => {
-            return Err(ToolError(
-                "no Studio session answered — open your place in Studio with the lest plugin \
-                 installed (`lest studio status` checks), then re-run"
-                    .into(),
-            ));
-        }
+    let work_dir = plan.root.join(".lest");
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| ToolError(format!("cannot create {}: {e}", work_dir.display())))?;
+    let script_path = work_dir.join("studio-run.luau");
+    let output_path = work_dir.join("studio-output.txt");
+    std::fs::write(&script_path, &built.script)
+        .map_err(|e| ToolError(format!("cannot write {}: {e}", script_path.display())))?;
+    // A stale output file from an earlier run must never be decoded as this
+    // run's results.
+    if output_path.exists() {
+        std::fs::remove_file(&output_path)
+            .map_err(|e| ToolError(format!("cannot clear {}: {e}", output_path.display())))?;
     }
 
-    // One playtest runs every spec, so the budget scales with the suite —
-    // the N-scaling the cloud backend avoids per-task is inherent to one
-    // session here, exactly as it is for the spawned runtimes.
     let spec_count = u32::try_from(plan.specs.len().max(1)).unwrap_or(u32::MAX);
-    let run_budget = PRESS_RUN_ALLOWANCE.saturating_add(budget.saturating_mul(spec_count));
+    let overall = BOOT_ALLOWANCE.saturating_add(budget.saturating_mul(spec_count));
 
-    crate::report::note_to_stderr("handing the suite to the Studio session…");
+    crate::report::note_to_stderr(&format!(
+        "launching Roblox Studio (a boot takes a while; budget {}s)…",
+        overall.as_secs()
+    ));
 
-    let mut decoder = LineDecoder::new(plan);
-    let mut on_line = |line: &str| decoder.feed(line, on_event);
-    let mut on_armed = || {
-        crate::report::note_to_stderr("suite armed in Studio — press Run (F8) there to execute it");
+    let mut child = Command::new(&exe)
+        .args(launch_args(&script_path, &output_path, &place))
+        .current_dir(&plan.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| ToolError(format!("cannot launch {}: {e}", exe.display())))?;
+
+    // Studio is a GUI process: no streaming to decode, so completion is its
+    // exit (--quitAfterExecution) bounded by the budget.
+    let deadline = Instant::now()
+        .checked_add(overall)
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break false,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break true;
+                }
+                std::thread::sleep(WAIT_POLL);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(ToolError(format!("cannot wait for Studio: {e}")));
+            }
+        }
     };
 
-    let outcome = bridge.run_suite(
-        &built.script,
-        FETCH_WAIT,
-        run_budget,
-        &mut on_line,
-        &mut on_armed,
-    )?;
-    let (outcomes, saw_protocol, current_spec) = decoder.into_parts();
-
-    match outcome {
-        RunOutcome::Finished { stopped } => {
-            if !stopped {
-                crate::report::note_to_stderr(
-                    "the playtest is still running — press Stop in Studio when you're done",
-                );
-            }
-            // The same false-green guard every backend carries: files ran,
-            // nothing was decided — an error, not a pass. Disarmed under a
-            // name filter, which legitimately selects zero tests (core
-            // drops non-matching tests without a skip event).
-            if outcomes == 0 && !plan.specs.is_empty() && plan.name_filter.is_none() {
-                return Err(ToolError(format!(
-                    "the studio session ran {} spec file(s) for suite \"{}\" but produced no \
-                     test outcomes — the bundle likely failed to load; check Studio's output \
-                     window",
-                    plan.specs.len(),
-                    plan.name
-                )));
-            }
-            Ok(())
+    // Decode whatever made it to disk — on a timeout the partial file still
+    // holds every event Studio flushed, and discarding streamed outcomes
+    // behind an error would hide everything that already ran.
+    let contents = std::fs::read_to_string(&output_path).unwrap_or_default();
+    let mut decoder = LineDecoder::new(plan);
+    let mut done_seen = false;
+    for line in contents.lines() {
+        if is_done_framed(line) {
+            done_seen = true;
         }
-        RunOutcome::RefusedSecret => Err(ToolError(
-            "a Studio plugin answered with a mismatched install — run `lest studio install`, \
-             restart Studio, and re-run"
+        decoder.feed(line, on_event)?;
+    }
+    let (outcomes, _saw_protocol, current_spec) = decoder.into_parts();
+
+    if timed_out {
+        // A hang inside the suite is a test failure (exit 1), matching the
+        // other backends' budget expiries.
+        let spec = current_spec.map(|i| plan.specs[i].as_path());
+        let path = spec
+            .map(|p| display_rel(p, &plan.root))
+            .unwrap_or_else(|| plan.name.clone());
+        let event = Event::TestFail {
+            path: vec![path],
+            name: "(timeout)".to_string(),
+            duration_ms: overall.as_millis() as f64,
+            failure: Failure::Error {
+                message: format!(
+                    "Studio exceeded suite \"{}\"'s budget ({}s) and was closed — a slow boot, \
+                     a login prompt, or a hung test",
+                    plan.name,
+                    overall.as_secs()
+                ),
+                trace: None,
+            },
+            origin: None,
+        };
+        on_event(spec, &event);
+        return Ok(());
+    }
+
+    if !done_seen {
+        if outcomes == 0 {
+            return Err(ToolError(format!(
+                "Studio exited without completing suite \"{}\" — the bundle likely failed to \
+                 load; its output (if any) is kept at {}",
+                plan.name,
+                output_path.display()
+            )));
+        }
+        // Partial results then silence: report the death against the spec
+        // that was running, keep what streamed.
+        let spec = current_spec.map(|i| plan.specs[i].as_path());
+        let path = spec
+            .map(|p| display_rel(p, &plan.root))
+            .unwrap_or_else(|| plan.name.clone());
+        let event = Event::TestFail {
+            path: vec![path],
+            name: "(aborted)".to_string(),
+            duration_ms: 0.0,
+            failure: Failure::Error {
+                message: format!(
+                    "Studio exited before suite \"{}\" finished — output kept at {}",
+                    plan.name,
+                    output_path.display()
+                ),
+                trace: None,
+            },
+            origin: None,
+        };
+        on_event(spec, &event);
+        return Ok(());
+    }
+
+    // The same false-green guard every backend carries, disarmed under a
+    // name filter (which legitimately selects zero tests — core drops
+    // non-matching tests without a skip event).
+    if outcomes == 0 && !plan.specs.is_empty() && plan.name_filter.is_none() {
+        return Err(ToolError(format!(
+            "Studio ran {} spec file(s) for suite \"{}\" but produced no test outcomes — \
+             output kept at {}",
+            plan.specs.len(),
+            plan.name,
+            output_path.display()
+        )));
+    }
+
+    // Success: the generated artifacts are noise now.
+    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_file(&output_path);
+    Ok(())
+}
+
+/// Where the suite runs: a local place file, or a published place.
+#[derive(Debug, PartialEq, Eq)]
+enum PlaceSource {
+    File(PathBuf),
+    Published { place: String, universe: String },
+}
+
+/// Resolves the place the launch opens. Studio must be told a place; there
+/// is no "whatever happens to be open" in the launch model.
+fn place_source(target: &CloudTarget, root: &Path) -> Result<PlaceSource, ToolError> {
+    if let Some(file) = &target.place_file {
+        let path = root.join(file);
+        if !path.is_file() {
+            return Err(ToolError(format!(
+                "the configured place_file does not exist: {}",
+                path.display()
+            )));
+        }
+        return Ok(PlaceSource::File(path));
+    }
+    if let (Some(place), Some(universe)) = (&target.place_id, &target.universe_id) {
+        return Ok(PlaceSource::Published {
+            place: place.clone(),
+            universe: universe.clone(),
+        });
+    }
+    Err(ToolError(
+        "the studio backend needs a place to launch — set `[cloud] place_file` (a built .rbxl) \
+         or `place_id` + `universe_id` in lest.toml"
+            .into(),
+    ))
+}
+
+/// The Studio CLI arguments for one run, per the documented flags.
+fn launch_args(script: &Path, output: &Path, place: &PlaceSource) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "--task".into(),
+        "RunScript".into(),
+        "--runScriptFile".into(),
+        script.as_os_str().to_owned(),
+        "--outputFile".into(),
+        output.as_os_str().to_owned(),
+        "--quitAfterExecution".into(),
+    ];
+    match place {
+        PlaceSource::File(path) => {
+            args.push("--localPlaceFile".into());
+            args.push(path.as_os_str().to_owned());
+        }
+        PlaceSource::Published { place, universe } => {
+            args.push("--placeId".into());
+            args.push(place.into());
+            args.push("--universeId".into());
+            args.push(universe.into());
+        }
+    }
+    args
+}
+
+/// Finds the Studio executable: the `[studio] executable` override first,
+/// then the platform's install location.
+fn studio_executable(explicit: Option<&Path>) -> Result<PathBuf, ToolError> {
+    if let Some(path) = explicit {
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+        return Err(ToolError(format!(
+            "the configured studio executable does not exist: {}",
+            path.display()
+        )));
+    }
+    if cfg!(windows) {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                ToolError("cannot locate Roblox Studio ($LOCALAPPDATA is not set)".into())
+            })?;
+        let versions = base.join("Roblox").join("Versions");
+        newest_studio_exe(&versions).ok_or_else(|| {
+            ToolError(format!(
+                "cannot find RobloxStudioBeta.exe under {} — is Studio installed? (or set \
+                 `[studio] executable` in lest.toml)",
+                versions.display()
+            ))
+        })
+    } else if cfg!(target_os = "macos") {
+        let path = PathBuf::from("/Applications/RobloxStudio.app/Contents/MacOS/RobloxStudio");
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(ToolError(
+                "cannot find Roblox Studio in /Applications — is it installed? (or set \
+                 `[studio] executable` in lest.toml)"
+                    .into(),
+            ))
+        }
+    } else {
+        Err(ToolError(
+            "Roblox Studio does not run on this platform — the studio backend needs Windows or \
+             macOS (engine suites can still run anywhere through the cloud backend)"
                 .into(),
-        )),
-        RunOutcome::NeverFetched => Err(ToolError(
-            "the Studio session stopped polling before it picked up the suite — is Studio \
-             still open? re-run once it is"
-                .into(),
-        )),
-        RunOutcome::Refused(reason) => Err(ToolError(format!(
-            "the Studio plugin refused the run: {reason}"
-        ))),
-        RunOutcome::Died => {
-            if saw_protocol {
-                // The suite started and went quiet: a hang inside the tests
-                // is a test failure (exit 1), matching the other backends'
-                // budget expiries — discarding the streamed outcomes behind
-                // a tool error would hide everything that already ran.
-                let spec = current_spec.map(|i| plan.specs[i].as_path());
-                let path = spec
-                    .map(|p| display_rel(p, &plan.root))
-                    .unwrap_or_else(|| plan.name.clone());
-                let event = Event::TestFail {
-                    path: vec![path],
-                    name: "(timeout)".to_string(),
-                    duration_ms: run_budget.as_millis() as f64,
-                    failure: Failure::Error {
-                        message: format!(
-                            "the studio session stopped streaming before suite \"{}\" finished \
-                             — was the playtest stopped early?",
-                            plan.name
-                        ),
-                        trace: None,
-                    },
-                    origin: None,
-                };
-                on_event(spec, &event);
-                Ok(())
-            } else {
-                Err(ToolError(
-                    "the suite was armed in Studio but no test events arrived — press Run (F8) \
-                     while the CLI is waiting; if you did, the bundle likely failed to load, \
-                     and Studio's output window has the error"
-                        .into(),
-                ))
+        ))
+    }
+}
+
+/// The newest per-version directory containing the Studio binary. Roblox
+/// installs each build under Versions/<hash>/; modification time picks the
+/// current one.
+fn newest_studio_exe(versions: &Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(versions).ok()? {
+        let entry = entry.ok()?;
+        let exe = entry.path().join("RobloxStudioBeta.exe");
+        if exe.is_file() {
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                best = Some((modified, exe));
             }
         }
     }
+    best.map(|(_, path)| path)
 }
 
 /// The done marker only *frames* a line when no event marker precedes it: a
 /// legitimate event payload (a snapshot's text, a failure message) may
 /// contain the marker characters, and dropping that line would lose a real
-/// verdict. The first-marker-wins rule from `classify`, applied to the third
-/// marker; the plugin applies the same test before treating a line as
-/// completion.
+/// verdict. The first-marker-wins rule from `classify`, applied here.
 fn is_done_framed(line: &str) -> bool {
     match line.find(DONE_SENTINEL) {
         None => false,
@@ -246,10 +385,10 @@ fn is_done_framed(line: &str) -> bool {
     }
 }
 
-/// Decodes relayed sentinel lines into protocol events, tracking the state
-/// the run outcome needs afterward. Split from `run` so the decode rules —
-/// boundary mapping, the done-framing skip, protocol validation, outcome
-/// counting — are testable without a bridge or a Studio.
+/// Decodes output-file sentinel lines into protocol events, tracking the
+/// state the run outcome needs afterward. Split from `run` so the decode
+/// rules — boundary mapping, the done-framing skip, protocol validation,
+/// outcome counting — are testable without launching anything.
 struct LineDecoder<'p> {
     plan: &'p SuitePlan,
     outcomes: usize,
@@ -272,9 +411,8 @@ impl<'p> LineDecoder<'p> {
     }
 
     fn feed(&mut self, line: &str, on_event: &mut EventSink) -> Result<(), ToolError> {
-        // The done marker is the plugin's signal; the /done post carries it
-        // to this side. As a relayed line it is framing, not output — but
-        // only when it actually frames the line (see `is_done_framed`).
+        // The done marker is framing, not output — but only when it actually
+        // frames the line (see `is_done_framed`).
         if is_done_framed(line) {
             return Ok(());
         }
@@ -294,9 +432,9 @@ impl<'p> LineDecoder<'p> {
                         Ok(())
                     }
                     None => Err(ToolError(format!(
-                        "the studio session sent the spec-boundary marker \"{raw}\", which is \
-                         not a 1-based index into suite \"{}\"'s {} spec file(s) — the injected \
-                         bundle and the CLI disagree about the spec list",
+                        "Studio's output carries the spec-boundary marker \"{raw}\", which is \
+                         not a 1-based index into suite \"{}\"'s {} spec file(s) — the bundle \
+                         and the CLI disagree about the spec list",
                         self.plan.name,
                         self.plan.specs.len()
                     ))),
@@ -307,7 +445,7 @@ impl<'p> LineDecoder<'p> {
                 self.saw_protocol = true;
                 let event = serde_json::from_str::<Event>(json).map_err(|err| {
                     ToolError(format!(
-                        "undecodable protocol line from the studio session while running suite \
+                        "undecodable protocol line in Studio's output while running suite \
                          \"{}\": {err}",
                         self.plan.name
                     ))
@@ -318,7 +456,7 @@ impl<'p> LineDecoder<'p> {
                 {
                     check_protocol_version(protocol_version).map_err(|mismatch| {
                         ToolError(format!(
-                            "framework/CLI protocol mismatch from the studio session: {mismatch}"
+                            "framework/CLI protocol mismatch from the Studio run: {mismatch}"
                         ))
                     })?;
                 }
@@ -333,9 +471,8 @@ impl<'p> LineDecoder<'p> {
                 Ok(())
             }
             Decoded::Output => {
-                // A relayed line always carried a marker (the plugin filters),
-                // but a payload could smuggle plain text here; echo it like
-                // every backend echoes test output.
+                // Test prints and Studio's own chatter both land in the
+                // output file; echo them like every backend echoes output.
                 println!("{line}");
                 Ok(())
             }
@@ -359,6 +496,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: None,
+            studio_executable: None,
         }
     }
 
@@ -425,10 +563,7 @@ mod tests {
         let seen = feed_all(
             &mut decoder,
             &[
-                // Framing marker: dropped, no event.
                 "@@LEST_STUDIO_DONE@@",
-                // The marker inside an event payload: a real event that must
-                // survive (the forged-teardown/lost-verdict hazard).
                 r#"@@LEST@@{"kind":"test_fail","path":[],"name":"has @@LEST_STUDIO_DONE@@ inside","durationMs":1,"failure":{"type":"error","message":"x"}}"#,
             ],
         )
@@ -465,5 +600,89 @@ mod tests {
         let mut decoder = LineDecoder::new(&plan);
         let err = feed_all(&mut decoder, &["@@LEST@@{not json"]).expect_err("must fail");
         assert!(err.to_string().contains("undecodable protocol line"));
+    }
+
+    #[test]
+    fn place_source_prefers_the_file_and_requires_something() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("place.rbxl");
+        std::fs::write(&file, "x").unwrap();
+
+        let with_file = CloudTarget {
+            universe_id: Some("1".into()),
+            place_id: Some("2".into()),
+            place_file: Some("place.rbxl".into()),
+        };
+        assert_eq!(
+            place_source(&with_file, dir.path()).expect("file"),
+            PlaceSource::File(file)
+        );
+
+        let published = CloudTarget {
+            universe_id: Some("1".into()),
+            place_id: Some("2".into()),
+            place_file: None,
+        };
+        assert_eq!(
+            place_source(&published, dir.path()).expect("published"),
+            PlaceSource::Published {
+                place: "2".into(),
+                universe: "1".into()
+            }
+        );
+
+        let nothing = CloudTarget::default();
+        let err = place_source(&nothing, dir.path()).expect_err("must fail");
+        assert!(err.to_string().contains("place_file"));
+    }
+
+    #[test]
+    fn launch_args_carry_the_documented_flags() {
+        let args = launch_args(
+            Path::new("s.luau"),
+            Path::new("o.txt"),
+            &PlaceSource::Published {
+                place: "22".into(),
+                universe: "11".into(),
+            },
+        );
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "--task",
+                "RunScript",
+                "--runScriptFile",
+                "s.luau",
+                "--outputFile",
+                "o.txt",
+                "--quitAfterExecution",
+                "--placeId",
+                "22",
+                "--universeId",
+                "11",
+            ]
+        );
+    }
+
+    #[test]
+    fn newest_studio_exe_picks_the_freshest_version_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("version-old");
+        let new = dir.path().join("version-new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("RobloxStudioBeta.exe"), "x").unwrap();
+        // Ensure a strictly newer directory mtime for the second version.
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("RobloxStudioBeta.exe"), "x").unwrap();
+
+        let found = newest_studio_exe(dir.path()).expect("found");
+        assert_eq!(found, new.join("RobloxStudioBeta.exe"));
+
+        assert_eq!(newest_studio_exe(&dir.path().join("missing")), None);
     }
 }

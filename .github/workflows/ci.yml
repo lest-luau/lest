@@ -101,15 +101,7 @@ jobs:
       # three OSes, which is where path-normalization differences
       # (Windows/macOS fold case, Linux does not) would surface.
       - name: lest
-        run: cargo run --locked -- run core coverage studio-plugin lune-runtime lute-runtime
-
-      # The studio plugin install/status/uninstall round-trip against the real
-      # platform paths (LOCALAPPDATA / ~/Documents). Studio itself only exists
-      # on Windows and macOS, and so do those paths — on Linux the command
-      # family errors cleanly by design, so there is nothing to round-trip.
-      - name: lest studio round-trip
-        if: matrix.os != 'ubuntu-latest'
-        run: cargo run --locked -- studio install && cargo run --locked -- studio status && cargo run --locked -- studio uninstall
+        run: cargo run --locked -- run core coverage lune-runtime lute-runtime
 
       # The engine suite executes server-side in Roblox's cloud, so one
       # platform's run proves it for all three — three runs would be three

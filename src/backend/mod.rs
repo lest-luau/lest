@@ -38,6 +38,9 @@ pub struct SuitePlan {
     /// maps into the place delegate to the engine's `require` instead of
     /// bundling a private copy.
     pub rojo_project: Option<PathBuf>,
+    /// `[studio] executable` — the Roblox Studio binary, for non-standard
+    /// installs. Only the studio backend consults it.
+    pub studio_executable: Option<PathBuf>,
 }
 
 /// Root-relative display form of a spec path, with forward slashes.
