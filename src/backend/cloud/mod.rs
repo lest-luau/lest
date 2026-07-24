@@ -103,7 +103,7 @@ fn run_with_transport<T: Transport>(
         session.pin_place_version(version);
     }
 
-    // `[settings] rojo`, consumed: string requires whose targets the project
+    // `[place] rojo`, consumed: string requires whose targets the project
     // file maps into the place delegate to the engine's require instead of
     // silently bundling a private copy. Parsed once per suite; a missing or
     // malformed project file is a tool error, not a silent fall-back to
@@ -396,8 +396,8 @@ fn api_key() -> Result<String, ToolError> {
 fn resolve_target(plan: &SuitePlan, target: &PlaceTarget) -> Result<(String, String), ToolError> {
     let missing = |field: &str| {
         ToolError(format!(
-            "cloud suite \"{}\" is missing `{field}` — add it under [cloud] in lest.toml (or on \
-             the suite as [suites.{}.cloud]). These are non-secret Roblox ids; find them in the \
+            "cloud suite \"{}\" is missing `{field}` — add it under [place] in lest.toml (or on \
+             the suite as [suites.{}.place]). These are non-secret Roblox ids; find them in the \
              Creator Dashboard URL for your experience and place.",
             plan.name, plan.name
         ))

@@ -287,7 +287,7 @@ fn deprecation_warnings(raw: &RawConfig) -> Vec<String> {
     let mut out = Vec::new();
     let mut moved = |old: &str, new: &str| {
         out.push(format!(
-            "`{old}` is deprecated and moves to `{new}` in 0.5 — update lest.toml"
+            "`{old}` was renamed to `{new}` in 0.4 and is removed in 0.5 — update lest.toml"
         ));
     };
     if raw.backend.is_some() {
@@ -312,7 +312,7 @@ fn deprecation_warnings(raw: &RawConfig) -> Vec<String> {
         {
             moved(
                 &format!("[suites.{name}.cloud]"),
-                &format!("[suites.{name}.place]"),
+                &format!("[suites.{name}.place] (and `place_file` becomes `file`)"),
             );
         }
     }
@@ -338,6 +338,11 @@ fn unknown_keys_message(unknown: &[String], path: &Path) -> String {
 /// handling that is delicate there. Parse failures return nothing — the real
 /// parse below reports those far better than a key list would.
 fn unknown_keys(text: &str) -> Vec<String> {
+    // DEPRECATION(0.5): these lists work on raw text, so the compiler will
+    // NOT flag them when the Raw fields go — remove "backend" and "cloud"
+    // from TOP, "cloud" from SUITE, "rojo" from SETTINGS, and the CLOUD
+    // list (with its collect calls below) by hand, or removed spellings
+    // will be silently ignored with no warning at all.
     const TOP: &[&str] = &[
         "backend", "suites", "settings", "coverage", "cloud", "place", "studio",
     ];
@@ -616,6 +621,8 @@ mod tests {
         assert_eq!(config.coverage.exclude, vec!["Packages/**"]);
     }
 
+    /// DEPRECATION(0.5): exercises deprecated spellings; rewrite or delete
+    /// with the fallbacks.
     #[test]
     fn place_file_inherits_top_level_and_suite_override_wins() {
         let config = parse(
@@ -645,6 +652,8 @@ mod tests {
 
     /// `[settings] rojo` was warned about while it was accepted-but-unconsumed;
     /// now that the cloud backend consumes it, setting it must be silent.
+    /// DEPRECATION(0.5): exercises deprecated spellings; rewrite or delete
+    /// with the fallbacks.
     #[test]
     fn a_deprecated_rojo_key_is_honored_and_warned() {
         // DEPRECATION(0.5): delete this test with the fallback it covers.
@@ -659,6 +668,89 @@ mod tests {
             Some("default.project.json"),
             "the deprecated spelling must still be honored in 0.4"
         );
+    }
+
+    #[test]
+    fn suite_place_overrides_everything_field_by_field() {
+        let config = parse(
+            r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [suites.engine.place]
+            place_id = 9
+            rojo = "engine.project.json"
+
+            [place]
+            universe_id = 1
+            place_id = 2
+            file = "top.rbxl"
+            rojo = "top.project.json"
+        "#,
+        );
+        let place = &config.suites[0].place;
+        // Set per-suite: wins. Unset per-suite: inherits the top place.
+        assert_eq!(place.place_id.as_deref(), Some("9"));
+        assert_eq!(place.rojo.as_deref(), Some("engine.project.json"));
+        assert_eq!(place.universe_id.as_deref(), Some("1"));
+        assert_eq!(place.file.as_deref(), Some("top.rbxl"));
+    }
+
+    /// DEPRECATION(0.5): the suite.cloud half of this test dies with the
+    /// fallbacks; keep the suite.place half.
+    #[test]
+    fn suite_place_beats_suite_cloud_which_beats_top() {
+        let config = parse(
+            r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [suites.engine.place]
+            universe_id = 100
+
+            [suites.engine.cloud]
+            universe_id = 200
+            place_id = 201
+
+            [place]
+            universe_id = 300
+            place_id = 301
+            file = "top.rbxl"
+        "#,
+        );
+        let place = &config.suites[0].place;
+        // place > cloud at the suite level; cloud still backfills what
+        // place leaves unset; top backfills the rest.
+        assert_eq!(place.universe_id.as_deref(), Some("100"));
+        assert_eq!(place.place_id.as_deref(), Some("201"));
+        assert_eq!(place.file.as_deref(), Some("top.rbxl"));
+    }
+
+    #[test]
+    fn place_ids_beat_cloud_ids_and_place_rojo_beats_settings_rojo() {
+        // DEPRECATION(0.5): delete this test with the fallbacks it covers.
+        let config = parse(
+            r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [cloud]
+            universe_id = 1
+            place_id = 2
+
+            [place]
+            universe_id = 11
+            place_id = 22
+            rojo = "new.project.json"
+
+            [settings]
+            rojo = "old.project.json"
+        "#,
+        );
+        let place = &config.suites[0].place;
+        assert_eq!(place.universe_id.as_deref(), Some("11"));
+        assert_eq!(place.place_id.as_deref(), Some("22"));
+        assert_eq!(place.rojo.as_deref(), Some("new.project.json"));
     }
 
     #[test]
@@ -727,7 +819,7 @@ mod tests {
         let raw: RawConfig = toml::from_str(text).unwrap();
         let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
         let all = warnings.join("\n");
-        assert!(all.contains("`backend` is deprecated"));
+        assert!(all.contains("`backend` was renamed"));
         assert!(all.contains("[settings] backend"));
         assert!(all.contains("[place] universe_id"));
         assert!(all.contains("[place] place_id"));

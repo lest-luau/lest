@@ -1,4 +1,4 @@
-# lest's own tests, run by lest itself (dogfood).
+# Lest's own tests, run by Lest itself (dogfood).
 
 # The framework's pure-logic specs run on the embedded VM.
 [suites.core]
@@ -42,7 +42,7 @@ universe_id = 10545683154
 place_id = 82459210338991
 
 [settings]
-backend = "native"   # default for suites that don't declare one
+backend = "native" # default for suites that don't declare one
 timeout_ms = 5000
 # Where this repo keeps lest/core (dogfood layout; package layouts are
 # auto-detected in a later phase).

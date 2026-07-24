@@ -89,7 +89,7 @@ Where this suite's specs run, overriding the top-level default. See
 [Backends](backends.md).
 
 - **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
-- **Default:** the top-level `backend`
+- **Default:** `[settings] backend`
 
 ### `default`
 
@@ -214,22 +214,6 @@ launches comes from the shared `[place]` block (`file`, or
 | --- | --- | --- | --- |
 | `executable` | string | platform install location | Path to the Roblox Studio binary, for non-standard installs. |
 
-## Migrating from 0.3
-
-0.4 renamed the place-related keys; the old spellings still work in 0.4
-(each with a warning naming its new home) and are **removed in 0.5**:
-
-| 0.3 | 0.4 |
-| --- | --- |
-| `backend` (top level) | `[settings] backend` |
-| `[cloud] universe_id` | `[place] universe_id` |
-| `[cloud] place_id` | `[place] place_id` |
-| `[cloud] place_file` | `[place] file` |
-| `[settings] rojo` | `[place] rojo` |
-| `[suites.<name>.cloud]` | `[suites.<name>.place]` |
-
-When both spellings are present, the new one wins.
-
 ## `[coverage]`
 
 Native suites only. See [Coverage](coverage.md).
@@ -266,3 +250,19 @@ native suite was instrumented, that's a tool error (exit 2) — see
 $ lest run unit --backend lune     # ignores the suite's declared backend
 $ lest --min 90                    # overrides [coverage] min
 ```
+
+## Migrating from 0.3
+
+0.4 renamed the place-related keys; the old spellings still work in 0.4
+(each with a warning naming its new home) and are **removed in 0.5**:
+
+| 0.3 | 0.4 |
+| --- | --- |
+| `backend` (top level) | `[settings] backend` |
+| `[cloud] universe_id` | `[place] universe_id` |
+| `[cloud] place_id` | `[place] place_id` |
+| `[cloud] place_file` | `[place] file` |
+| `[settings] rojo` | `[place] rojo` |
+| `[suites.<name>.cloud]` | `[suites.<name>.place]` |
+
+When both spellings are present, the new one wins.

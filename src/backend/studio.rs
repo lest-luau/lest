@@ -67,7 +67,7 @@ pub fn run(
         })
         .collect();
 
-    // `[settings] rojo`, honored exactly as the cloud backend honors it: the
+    // `[place] rojo`, honored exactly as the cloud backend honors it: the
     // launched place is the one mapped requires delegate into.
     let place_map = match &plan.rojo_project {
         Some(project) => Some(
@@ -312,7 +312,7 @@ fn place_source(target: &PlaceTarget, root: &Path) -> Result<PlaceSource, ToolEr
         let path = root.join(file);
         if !path.is_file() {
             return Err(ToolError(format!(
-                "the configured place_file does not exist: {}",
+                "the configured [place] file does not exist: {}",
                 path.display()
             )));
         }
@@ -325,7 +325,7 @@ fn place_source(target: &PlaceTarget, root: &Path) -> Result<PlaceSource, ToolEr
         });
     }
     Err(ToolError(
-        "the studio backend needs a place to launch — set `[cloud] place_file` (a built .rbxl) \
+        "the studio backend needs a place to launch — set `[place] file` (a built .rbxl) \
          or `place_id` + `universe_id` in lest.toml"
             .into(),
     ))
@@ -813,7 +813,7 @@ mod tests {
 
         let nothing = PlaceTarget::default();
         let err = place_source(&nothing, dir.path()).expect_err("must fail");
-        assert!(err.to_string().contains("place_file"));
+        assert!(err.to_string().contains("[place] file"));
     }
 
     #[test]

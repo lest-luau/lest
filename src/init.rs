@@ -507,6 +507,10 @@ fn render_config(answers: &Answers) -> String {
              [suites.engine]\ninclude = [\"{ENGINE_DIR}/**/*.spec.luau\"]\nbackend = \"cloud\"\n\
              default = false # opt-in locally; auto-enabled in CI\n"
         ));
+    }
+    // Any engine-bound config needs a place to run in — whether via a
+    // dedicated cloud suite or cloud as the default backend.
+    if answers.cloud_suite || answers.backend == BackendKind::Cloud {
         out.push_str(
             "\n# The Roblox place engine suites run in (cloud targets it; studio launches it).\n\
              # Find the ids in the Creator Dashboard URL; they are not secret.\n\
