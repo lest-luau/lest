@@ -962,7 +962,7 @@ pub fn run_suites_with(
                     backend::runtime::run(crate::resolve::Runtime::Lute, &plan, &mut sink)
                 }
                 BackendKind::Cloud => backend::cloud::run(&plan, &suite.cloud, &mut sink),
-                BackendKind::Studio => backend::studio::run(&plan, &mut sink),
+                BackendKind::Studio => backend::studio::run(&plan, &suite.cloud, &mut sink),
             }
         };
 
@@ -1111,7 +1111,7 @@ pub fn select_suites(
     Ok(selected)
 }
 
-fn is_ci() -> bool {
+pub(crate) fn is_ci() -> bool {
     match std::env::var("CI") {
         Ok(value) => !value.is_empty() && value != "0" && value.to_lowercase() != "false",
         Err(_) => false,

@@ -61,6 +61,14 @@ local bridge = Bridge.new({ port = PORT, secret = SECRET, version = VERSION }, {
 	run = {
 		inject = function (source)
 			local ok, err = pcall(function ()
+				-- Sweep any stale script first: a crashed or closed session
+				-- never ran teardown, and a leftover re-executes on every
+				-- Run press — doubling outcomes during the next lest run.
+				local stale = ServerScriptService:FindFirstChild('LestRun')
+				while stale ~= nil do
+					stale:Destroy()
+					stale = ServerScriptService:FindFirstChild('LestRun')
+				end
 				local injected = Instance.new('Script')
 				injected.Name = 'LestRun'
 				injected.Source = source

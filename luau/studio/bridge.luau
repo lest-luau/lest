@@ -196,15 +196,23 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 		end
 	end
 
-	--- POSTs a JSON payload; true when the server acknowledged it.
+	--- POSTs a JSON payload; true when the server acknowledged it. Encoding
+	--- runs protected: `JSONEncode` can throw on hostile bytes in a relayed
+	--- line, and an unencodable payload must count as a failed post (the
+	--- run machinery re-queues and eventually aborts) rather than kill the
+	--- poll loop.
 	local function postJson (path: string, payload: { [string]: any }): boolean
+		local okEncode, body = pcall(deps.encode, payload)
+		if not okEncode then
+			return false
+		end
 		local postHeaders = headers()
 		postHeaders['content-type'] = 'application/json'
 		local result = deps.request({
 			method = 'POST',
 			url = url(path),
 			headers = postHeaders,
-			body = deps.encode(payload),
+			body = body,
 		})
 		return result.ok and (result.status == 200 or result.status == 204)
 	end
@@ -252,6 +260,22 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 			or string.find(message, run.markers.done, 1, true) ~= nil
 	end
 
+	--- The done marker only *frames* a line when no event marker precedes it:
+	--- a legitimate event payload (a snapshot's text, a failure message) may
+	--- contain the marker characters, and treating that as completion would
+	--- tear the playtest down mid-suite — worse than the forged-reporting the
+	--- spawned runtimes' framing-not-security stance accepts, so the
+	--- first-marker-wins rule is applied to this marker on both sides of the
+	--- wire (the CLI applies the same test before dropping done lines).
+	local function isDoneFramed (run: ActiveRun, message: string): boolean
+		local doneAt = string.find(message, run.markers.done, 1, true)
+		if doneAt == nil then
+			return false
+		end
+		local eventAt = string.find(message, run.markers.event, 1, true)
+		return eventAt == nil or doneAt < eventAt
+	end
+
 	--- Starts a run job: subscribe to the log relay, inject the bundle,
 	--- attempt the adaptive start, and acknowledge with whether the world is
 	--- already running (`started = false` means the user's Run press starts
@@ -268,7 +292,11 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 			return POLL_IDLE
 		end
 		if active ~= nil then
-			postJson('/result', { id = job.id, ok = false, error = 'a run is already in progress' })
+			postJson('/result', {
+				id = job.id,
+				ok = false,
+				error = 'a run is already in progress (a stale one clears itself within a few seconds)',
+			})
 			return POLL_IDLE
 		end
 		local markers = job.markers
@@ -303,7 +331,7 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 				return
 			end
 			table.insert(run.buffer, message)
-			if string.find(message, run.markers.done, 1, true) ~= nil then
+			if isDoneFramed(run, message) then
 				run.done = true
 			end
 		end)
@@ -352,6 +380,15 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 			if postJson('/events', { id = run.id, lines = lines }) then
 				run.postFailures = 0
 			else
+				-- Re-queue ahead of anything that arrived during the post:
+				-- a transient failure (an HttpService throttle, say) must
+				-- not silently drop protocol events — a lost test_fail or
+				-- boundary marker reports a green run with tests missing.
+				local requeued = table.clone(lines)
+				for _, late in run.buffer do
+					table.insert(requeued, late)
+				end
+				run.buffer = requeued
 				run.postFailures += 1
 				if run.postFailures >= MAX_POST_FAILURES then
 					deps.warn('lest lost its CLI session mid-run — stopping the playtest and cleaning up')

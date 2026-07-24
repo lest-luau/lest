@@ -625,7 +625,7 @@ pub(crate) fn credentials() -> Result<(u16, String), ToolError> {
 /// The version-handshake note for a live session: a running plugin that does
 /// not match this binary gets explicit re-install and restart instructions,
 /// never a silent skew. `None` when versions agree.
-fn version_note(plugin_version: &str) -> Option<String> {
+pub(crate) fn version_note(plugin_version: &str) -> Option<String> {
     if plugin_version == env!("CARGO_PKG_VERSION") {
         return None;
     }

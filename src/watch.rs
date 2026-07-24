@@ -73,7 +73,7 @@ pub fn run(
     let mut selected = watchable(select_suites(&config, suite_names, backend_override)?);
     if selected.is_empty() {
         return Err(ToolError(
-            "nothing to watch — every selected suite uses the cloud backend".to_string(),
+            "nothing to watch — every selected suite uses a backend watch cannot re-run (cloud or studio)".to_string(),
         ));
     }
 
@@ -207,8 +207,8 @@ pub fn run(
             eprint!(
                 "{}",
                 render_warning(
-                    "nothing to watch — every selected suite now uses the cloud backend; edit \
-                     lest.toml to select a watchable suite",
+                    "nothing to watch — every selected suite now uses a backend watch cannot \
+                     re-run (cloud or studio); edit lest.toml to select a watchable suite",
                     err_color,
                 )
             );

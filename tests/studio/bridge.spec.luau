@@ -595,6 +595,51 @@ describe('run jobs', function ()
 		expect(h.encoded[#h.encoded].lines).toEqual({})
 	end)
 
+	it('re-queues a batch when its post fails, preserving order', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.emitLog('@@E@@{"kind":"test_fail"}')
+		fake.emitLog('@@S@@1')
+		h.respond(NO_SERVER) -- the flush fails once
+		h.bridge.step()
+		-- A line arriving during/after the failed flush lands behind the
+		-- re-queued batch, never ahead of it.
+		fake.emitLog('@@E@@{"kind":"test_pass"}')
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		local flushed = h.encoded[#h.encoded]
+		expect(flushed.lines).toEqual({
+			'@@E@@{"kind":"test_fail"}',
+			'@@S@@1',
+			'@@E@@{"kind":"test_pass"}',
+		})
+	end)
+
+	it('does not treat a done marker inside an event payload as completion', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.running[1] = true
+		-- A legitimate event whose payload contains the done marker text —
+		-- a snapshot value or failure message could carry it.
+		fake.emitLog('@@E@@{"kind":"snapshot","received":"contains @@D@@ inside"}')
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		-- Still running: no stop, no cleanup, no /done — the line relayed
+		-- as an ordinary event.
+		expect(#fake.stopAttempts).toBe(0)
+		expect(#fake.cleanups).toBe(0)
+		local flushed = h.encoded[#h.encoded]
+		expect(#flushed.lines).toBe(1)
+		-- A done marker that frames its own line still finishes the run.
+		fake.emitLog('@@D@@')
+		h.respond({ ok = true, status = 200 })
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		expect(#fake.cleanups).toBe(1)
+	end)
+
 	it('aborts the run after repeated failed posts (the CLI died)', function ()
 		local fake = makeFakeRun()
 		local h = makeHarness(fake)

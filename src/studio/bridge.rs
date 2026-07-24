@@ -5,12 +5,14 @@
 //! S2 scope: enough server to prove the loop end to end. The CLI binds
 //! `127.0.0.1:<port>`, a polling plugin picks up a pre-queued `ping` job on
 //! `GET /job`, answers on `POST /result`, and `lest studio status` reports
-//! the live session. Requests are answered immediately in this slice; the
-//! held long-poll (waiting for work to arrive) comes with the run-support PR.
-//! That hold is a budget requirement, not polish: an immediate-204 server
-//! against the plugin's 0.1s idle re-poll would burn ~600 requests/minute of
-//! Studio's shared HTTP budget in a sustained session. The probe gets away
-//! without it because a healthy probe is two requests total.
+//! the live session; run sessions stream a suite through the same socket.
+//! Requests are still answered immediately — the held long-poll (waiting
+//! for work to arrive) is deferred to the persistent-session work, where it
+//! becomes a budget requirement: an immediate-204 server against the
+//! plugin's 0.1s idle re-poll burns ~600 requests/minute of Studio's shared
+//! HTTP budget. Today that burn exists in exactly one shape — a *second*
+//! open Studio polling through another instance's run — and is accepted
+//! for this slice; single-session traffic stays far under budget.
 //!
 //! Hand-rolled HTTP/1.1 over `TcpListener` on purpose: the surface is two
 //! routes on a loopback socket that lest owns both ends of. Each request is
@@ -322,7 +324,7 @@ impl Bridge {
         })
         .to_string();
 
-        let mut deadline = Instant::now() + fetch_wait;
+        let mut deadline = deadline_after(fetch_wait);
         let mut refused_secret = false;
         let mut state = RunState {
             fetched: false,
@@ -347,7 +349,7 @@ impl Bridge {
                     if state.fetched && !was_fetched {
                         // The job is out; the budget now covers arming, the
                         // user's Run press, and the suite.
-                        deadline = Instant::now() + run_budget;
+                        deadline = deadline_after(run_budget);
                     }
                     if state.needs_armed_notice && !state.armed_reported {
                         // Exactly once, and only after an ack that said the
@@ -506,6 +508,15 @@ fn decode_for(
         return None;
     }
     Some(value)
+}
+
+/// `Instant + Duration` guarded the way `runtime.rs` guards it: the budget
+/// derives from unvalidated `timeout_ms` config, and the unchecked `Add`
+/// panics on overflow — exit 101, bypassing the exit-code policy.
+fn deadline_after(wait: Duration) -> Instant {
+    Instant::now()
+        .checked_add(wait)
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400))
 }
 
 /// The outcome when a run window closes without `/done`.

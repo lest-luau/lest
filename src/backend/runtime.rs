@@ -36,8 +36,10 @@ pub(crate) const SENTINEL: &str = "@@LEST@@";
 pub(crate) const SPEC_SENTINEL: &str = "@@LEST_SPEC@@";
 /// The studio run's terminal marker: printed once after the last spec so the
 /// plugin knows the suite finished without waiting for a process exit (the
-/// signal the spawned runtimes get for free). Distinct from the other two
-/// within its first eight bytes, per the tie rule below.
+/// signal the spawned runtimes get for free). `classify` never sees it — the
+/// studio path drops done-framed lines before classifying — and the studio
+/// side applies its own first-marker-wins rule against the event marker, so
+/// a payload containing this text cannot forge completion.
 pub(crate) const DONE_SENTINEL: &str = "@@LEST_STUDIO_DONE@@";
 const HARNESS_TEMPLATE: &str = include_str!("../../luau/runtime/harness.luau");
 
