@@ -437,6 +437,17 @@ return collector.events()
     Ok(())
 }
 
+/// A marker as split Luau string concatenation, so the generated source
+/// never contains the complete marker text. Studio dumps an erroring
+/// script's source into the same output channel the markers frame, and a
+/// source line carrying a whole marker would decode as a broken event —
+/// the harness template's never-spell-a-complete-marker rule, applied to
+/// codegen.
+fn split_marker(marker: &str) -> String {
+    let mid = marker.len() / 2;
+    format!("'{}' .. '{}'", &marker[..mid], &marker[mid..])
+}
+
 /// The studio entrypoint tail: the same per-spec drive as the cloud head,
 /// but events leave as sentinel-framed `print` lines (the spawned-runtime
 /// framing, decoded by the same CLI code) instead of buffering for a task
@@ -470,7 +481,8 @@ fn emit_studio_head(
     ));
     out.push_str("local __lest_http = game:GetService('HttpService')\n");
     out.push_str(&format!(
-        "local function __lest_emit (event)\n\tprint('{SENTINEL}' .. __lest_http:JSONEncode(Sanitize.value(event)))\nend\n"
+        "local function __lest_emit (event)\n\tprint({sent} .. __lest_http:JSONEncode(Sanitize.value(event)))\nend\n",
+        sent = split_marker(SENTINEL)
     ));
 
     out.push_str("local __lest_specs = {\n");
@@ -493,7 +505,7 @@ fn emit_studio_head(
     // already parses.
     out.push_str(&format!(
         r#"for __lest_index, spec in __lest_specs do
-	print('{spec_sentinel}' .. tostring(__lest_index))
+	print({spec_sentinel} .. tostring(__lest_index))
 	Lest.reset()
 	local ok, err = pcall(spec.load)
 	if not ok then
@@ -523,10 +535,10 @@ fn emit_studio_head(
 		end
 	end
 end
-print('{done_sentinel}')
+print({done_sentinel})
 "#,
-        spec_sentinel = SPEC_SENTINEL,
-        done_sentinel = DONE_SENTINEL,
+        spec_sentinel = split_marker(SPEC_SENTINEL),
+        done_sentinel = split_marker(DONE_SENTINEL),
         deadline = input.deadline_ms,
     ));
 
@@ -899,9 +911,13 @@ mod tests {
         // entrypoint (and its collector return) is absent. Matched on the
         // entry banners: the embedded collector module's own doc comment
         // legitimately contains collector-usage text in every bundle.
-        assert!(script.contains(crate::backend::runtime::SENTINEL));
-        assert!(script.contains(crate::backend::runtime::SPEC_SENTINEL));
-        assert!(script.contains(crate::backend::runtime::DONE_SENTINEL));
+        // The source must NOT contain any complete marker: Studio echoes
+        // erroring source into the decoded channel, and a whole marker in
+        // source would decode as a broken event. Split concatenation only.
+        assert!(!script.contains(crate::backend::runtime::SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::SPEC_SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::DONE_SENTINEL));
+        assert!(script.contains("'@@LE' .. 'ST@@'"));
         assert!(script.contains("JSONEncode(Sanitize.value(event))"));
         assert!(script.contains("-- Entrypoint: stream each spec's events"));
         assert!(!script.contains("-- Entrypoint: run each spec through the embedded collector"));

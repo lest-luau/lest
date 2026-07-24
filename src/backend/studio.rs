@@ -185,15 +185,17 @@ pub fn run(
     let lines: Vec<String> = contents.lines().map(unwrap_csv_field).collect();
     let done_seen = lines.iter().any(|line| is_done_framed(line));
     let mut decoder = LineDecoder::new(plan);
-    for (index, line) in lines.iter().enumerate() {
+    for line in &lines {
         match decoder.feed(line, on_event) {
             Ok(()) => {}
-            Err(_) if !done_seen && index + 1 == lines.len() => {
-                // A torn final write is expected of a run that never
-                // completed (the kill or crash landed mid-line); echoing it
-                // beats discarding every outcome behind an exit 2. A
-                // mid-stream undecodable line, or any on a completed run,
-                // stays a hard error.
+            Err(_) if !done_seen => {
+                // On a run that never completed, undecodable marker-lines
+                // are expected, not protocol violations: a kill tears the
+                // final write, and a load error makes Studio dump the
+                // script's own source — which mentions the markers — into
+                // this same channel. Echo and keep going; the no-done
+                // diagnosis below is the real report. A completed run
+                // keeps the hard error: its stream must be clean.
                 println!("{line}");
             }
             Err(e) => return Err(e),
