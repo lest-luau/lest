@@ -16,6 +16,75 @@ type Recorded = {
 	body: string?,
 }
 
+--- A scripted engine for run jobs: records every hook call, lets the spec
+--- fire log lines and flip the running state.
+type FakeRun = {
+	hooks: Bridge.RunHooks,
+	injected: { string },
+	startAttempts: { boolean },
+	stopAttempts: { boolean },
+	cleanups: { boolean },
+	disconnects: { boolean },
+	--- What `isRunning` reports; `tryStart`/`tryStop` set it to their
+	--- configured outcomes below.
+	running: { boolean },
+	startWorks: { boolean },
+	stopWorks: { boolean },
+	--- Fires the callback `connectLog` registered (errors when none is).
+	emitLog: (message: string) -> (),
+}
+
+local function makeFakeRun (): FakeRun
+	local fake: FakeRun
+	local logCallback: ((message: string) -> ())? = nil
+	fake = {
+		injected = {},
+		startAttempts = {},
+		stopAttempts = {},
+		cleanups = {},
+		disconnects = {},
+		running = { false },
+		startWorks = { false },
+		stopWorks = { true },
+		emitLog = function (message)
+			assert(logCallback ~= nil, 'no log callback connected')
+			logCallback(message)
+		end,
+		hooks = {
+			inject = function (source)
+				table.insert(fake.injected, source)
+				return true, nil
+			end,
+			tryStart = function ()
+				table.insert(fake.startAttempts, true)
+				fake.running[1] = fake.startWorks[1]
+				return fake.running[1]
+			end,
+			tryStop = function ()
+				table.insert(fake.stopAttempts, true)
+				if fake.stopWorks[1] then
+					fake.running[1] = false
+				end
+				return not fake.running[1]
+			end,
+			isRunning = function ()
+				return fake.running[1]
+			end,
+			cleanup = function ()
+				table.insert(fake.cleanups, true)
+			end,
+			connectLog = function (callback)
+				logCallback = callback
+				return function ()
+					table.insert(fake.disconnects, true)
+					logCallback = nil
+				end
+			end,
+		},
+	}
+	return fake
+end
+
 type Harness = {
 	bridge: Bridge.Bridge,
 	requests: { Recorded },
@@ -27,17 +96,20 @@ type Harness = {
 	registerBody: (text: string, value: any) -> (),
 	--- Everything the bridge passed to `encode`, in order.
 	encoded: { any },
+	--- Advance the fake clock by seconds.
+	advance: (seconds: number) -> (),
 }
 
 local CONFIG: Bridge.Config = { port = 41999, secret = 'shh-secret', version = '1.2.3' }
 
-local function makeHarness (): Harness
+local function makeHarness (fakeRun: FakeRun?): Harness
 	local requests: { Recorded } = {}
 	local logs: { string } = {}
 	local warnings: { string } = {}
 	local queue: { Bridge.RequestResult } = {}
 	local bodies: { [string]: any } = {}
 	local encoded: { any } = {}
+	local now = { 0 }
 
 	local deps: Bridge.Deps = {
 		request = function (options)
@@ -72,6 +144,10 @@ local function makeHarness (): Harness
 		place = function ()
 			return { name = 'Test Place', placeId = 12345 }
 		end,
+		clock = function ()
+			return now[1]
+		end,
+		run = if fakeRun ~= nil then fakeRun.hooks else nil,
 	}
 
 	local bridge = Bridge.new(CONFIG, deps)
@@ -87,6 +163,9 @@ local function makeHarness (): Harness
 			bodies[text] = value
 		end,
 		encoded = encoded,
+		advance = function (seconds)
+			now[1] += seconds
+		end,
 	}
 end
 
@@ -378,5 +457,163 @@ describe('jobs', function ()
 		expect(function ()
 			h.bridge.step()
 		end).toNotThrow()
+	end)
+end)
+
+local RUN_JOB = {
+	id = 'run-1',
+	kind = 'run',
+	bundle = 'THE BUNDLE',
+	markers = { event = '@@E@@', spec = '@@S@@', done = '@@D@@' },
+}
+
+--- Feeds the run job to an idle bridge and answers its ack. One poll, one
+--- POST /result.
+local function startRun (h: Harness)
+	h.registerBody('run-job', RUN_JOB)
+	h.respond({ ok = true, status = 200, body = 'run-job' })
+	h.respond({ ok = true, status = 200 })
+	h.bridge.step()
+end
+
+describe('run jobs', function ()
+	it('refuses a run when the host has no engine hooks', function ()
+		local h = makeHarness()
+		h.registerBody('run-job', RUN_JOB)
+		h.respond({ ok = true, status = 200, body = 'run-job' })
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		expect(#h.encoded).toBe(1)
+		expect(h.encoded[1].ok).toBe(false)
+		expect(h.encoded[1].error).toContain('cannot run suites')
+	end)
+
+	it('refuses a malformed run job with update guidance', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		h.registerBody('bad-run', { id = 'r2', kind = 'run', bundle = 'X', markers = { event = '@@E@@' } })
+		h.respond({ ok = true, status = 200, body = 'bad-run' })
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		expect(h.encoded[1].ok).toBe(false)
+		expect(h.encoded[1].error).toContain('lest studio install')
+		expect(#fake.injected).toBe(0)
+	end)
+
+	it('injects, attempts the start, and acks with started=false plus the armed log', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		expect(fake.injected).toEqual({ 'THE BUNDLE' })
+		expect(#fake.startAttempts).toBe(1)
+		local ack = h.encoded[1]
+		expect(ack.id).toBe('run-1')
+		expect(ack.ok).toBe(true)
+		expect(ack.started).toBe(false)
+		-- The connect log plus exactly one armed instruction.
+		expect(h.logs[#h.logs]).toContain('press Run')
+	end)
+
+	it('acks started=true and skips the armed log when the start works', function ()
+		local fake = makeFakeRun()
+		fake.startWorks[1] = true
+		local h = makeHarness(fake)
+		startRun(h)
+		expect(h.encoded[1].started).toBe(true)
+		for _, line in h.logs do
+			-- No toNotContain matcher yet; a nil find is the same claim.
+			expect(string.find(line, 'press Run', 1, true)).toBeNil()
+		end
+	end)
+
+	it('relays only marker-carrying lines, batched to /events with the job id', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.emitLog('plain studio chatter')
+		fake.emitLog('@@E@@{"kind":"test_pass"}')
+		fake.emitLog('@@S@@1')
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		local flush = h.encoded[2]
+		expect(flush.id).toBe('run-1')
+		expect(flush.lines).toEqual({ '@@E@@{"kind":"test_pass"}', '@@S@@1' })
+		local post = h.requests[#h.requests]
+		expect(post.url).toBe('http://127.0.0.1:41999/events')
+	end)
+
+	it('finishes on the done marker: flush, stop, cleanup, disconnect, /done', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.running[1] = true -- the user pressed Run
+		fake.emitLog('@@E@@{"kind":"run_end"}')
+		fake.emitLog('@@D@@')
+		h.respond({ ok = true, status = 200 }) -- the /events flush
+		h.respond({ ok = true, status = 200 }) -- the /done
+		h.bridge.step()
+		expect(#fake.stopAttempts).toBe(1)
+		expect(#fake.cleanups).toBe(1)
+		expect(#fake.disconnects).toBe(1)
+		local done = h.encoded[#h.encoded]
+		expect(done.id).toBe('run-1')
+		expect(done.ok).toBe(true)
+		expect(done.stopped).toBe(true)
+		local doneUrl = h.requests[#h.requests].url
+		expect(doneUrl).toBe('http://127.0.0.1:41999/done')
+		-- Idle again: the next step polls /job.
+		h.respond(IDLE)
+		h.bridge.step()
+		expect(h.requests[#h.requests].url).toBe('http://127.0.0.1:41999/job')
+	end)
+
+	it('asks the user to press Stop when the stop attempt fails', function ()
+		local fake = makeFakeRun()
+		fake.stopWorks[1] = false
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.running[1] = true
+		fake.emitLog('@@D@@')
+		h.respond({ ok = true, status = 200 })
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		expect(h.logs[#h.logs]).toContain('press Stop')
+		expect(h.encoded[#h.encoded].stopped).toBe(false)
+	end)
+
+	it('sends an empty keepalive after the quiet interval', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		-- No lines, clock still fresh: the step makes no request at all.
+		h.bridge.step()
+		local before = #h.requests
+		h.advance(3)
+		h.respond({ ok = true, status = 200 })
+		h.bridge.step()
+		expect(#h.requests).toBe(before + 1)
+		expect(h.encoded[#h.encoded].lines).toEqual({})
+	end)
+
+	it('aborts the run after repeated failed posts (the CLI died)', function ()
+		local fake = makeFakeRun()
+		local h = makeHarness(fake)
+		startRun(h)
+		fake.running[1] = true
+		for _ = 1, 3 do
+			fake.emitLog('@@E@@{"kind":"test_pass"}')
+			h.respond(NO_SERVER)
+			h.bridge.step()
+			h.advance(3)
+		end
+		expect(#h.warnings).toBe(1)
+		expect(h.warnings[1]).toContain('lost its CLI session')
+		expect(#fake.stopAttempts).toBe(1)
+		expect(#fake.cleanups).toBe(1)
+		expect(#fake.disconnects).toBe(1)
+		-- Idle again afterward.
+		h.respond(IDLE)
+		h.bridge.step()
+		expect(h.requests[#h.requests].url).toBe('http://127.0.0.1:41999/job')
 	end)
 end)

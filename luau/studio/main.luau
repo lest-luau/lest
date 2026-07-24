@@ -6,10 +6,10 @@
 --
 -- Engine globals live only in this file, which is why it is excluded in
 -- selene.toml (the same accommodation the engine specs get). Every decision —
--- polling, backoff, warnings, job handling — lives in the `bridge` module
--- next door, which is pure Luau and tested by lest's own native suite
--- (tests/studio). This file only wires the real engine into the bridge's
--- `Deps` and loops.
+-- polling, backoff, warnings, job handling, the run state machine — lives in
+-- the `bridge` module next door, which is pure Luau and tested by lest's own
+-- native suite (tests/studio). This file only wires the real engine into the
+-- bridge's `Deps` and loops.
 --
 -- The three placeholder lines carry working defaults and are swapped whole,
 -- keyed on their trailing marker comments — the runtime harness convention:
@@ -23,6 +23,13 @@ local SECRET = 'unconfigured' -- __LEST_STUDIO_SECRET__
 local Bridge = require(script.bridge)
 
 local HttpService = game:GetService('HttpService')
+local RunService = game:GetService('RunService')
+local LogService = game:GetService('LogService')
+local ServerScriptService = game:GetService('ServerScriptService')
+
+-- The Script the current run injected, if any; cleanup destroys it (injected
+-- instances survive Stop, so nothing else will).
+local runScript: Script? = nil
 
 local bridge = Bridge.new({ port = PORT, secret = SECRET, version = VERSION }, {
 	request = function (options)
@@ -50,6 +57,56 @@ local bridge = Bridge.new({ port = PORT, secret = SECRET, version = VERSION }, {
 	place = function ()
 		return { name = game.Name, placeId = game.PlaceId }
 	end,
+	clock = os.clock,
+	run = {
+		inject = function (source)
+			local ok, err = pcall(function ()
+				local injected = Instance.new('Script')
+				injected.Name = 'LestRun'
+				injected.Source = source
+				injected.Parent = ServerScriptService
+				runScript = injected
+			end)
+			return ok, if ok then nil else tostring(err)
+		end,
+		tryStart = function ()
+			-- Expected to be a no-op on today's platform (hand-verified);
+			-- attempted anyway so lest gets the automatic start the moment
+			-- the engine ever honors it. The wait gives a successful call
+			-- time to actually transition before we report the verdict.
+			pcall(function ()
+				RunService:Run()
+			end)
+			task.wait(1)
+			return RunService:IsRunning()
+		end,
+		tryStop = function ()
+			pcall(function ()
+				RunService:Stop()
+			end)
+			task.wait(0.5)
+			return not RunService:IsRunning()
+		end,
+		isRunning = function ()
+			return RunService:IsRunning()
+		end,
+		cleanup = function ()
+			if runScript ~= nil then
+				pcall(function ()
+					(runScript :: Script):Destroy()
+				end)
+				runScript = nil
+			end
+		end,
+		connectLog = function (callback)
+			local connection = LogService.MessageOut:Connect(function (message)
+				callback(message)
+			end)
+			return function ()
+				connection:Disconnect()
+			end
+		end,
+	},
 })
 
 task.spawn(function ()

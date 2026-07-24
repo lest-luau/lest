@@ -138,6 +138,11 @@ pub enum Head {
     /// Open Cloud task: events buffer in the embedded collector and the task
     /// returns them as JSON (`output.results[0]`).
     Cloud,
+    /// Studio playtest: events stream as sentinel-framed `print` lines (the
+    /// spawned-runtime framing), captured from LogService by the companion
+    /// plugin and relayed to the CLI bridge live. A done marker after the
+    /// last spec replaces the process exit spawned runtimes signal with.
+    Studio,
 }
 
 /// Everything the bundler needs to emit one self-contained entrypoint.
@@ -332,6 +337,7 @@ pub fn bundle_with_cache(
     let core_id = module_id(&core)?;
     match input.head {
         Head::Cloud => emit_cloud_head(&mut out, input, &core_id, &id_of)?,
+        Head::Studio => emit_studio_head(&mut out, input, &core_id, &id_of)?,
     }
 
     Ok(Bundle {
@@ -431,6 +437,102 @@ return collector.events()
     Ok(())
 }
 
+/// The studio entrypoint tail: the same per-spec drive as the cloud head,
+/// but events leave as sentinel-framed `print` lines (the spawned-runtime
+/// framing, decoded by the same CLI code) instead of buffering for a task
+/// return. Sanitize keeps every event JSON-encodable; the engine's
+/// `HttpService:JSONEncode` does the encoding, since an injected server
+/// Script always has it.
+fn emit_studio_head(
+    out: &mut String,
+    input: &BundleInput,
+    core_id: &str,
+    id_of: &BTreeMap<PathBuf, String>,
+) -> Result<(), ToolError> {
+    use crate::backend::runtime::{DONE_SENTINEL, SENTINEL, SPEC_SENTINEL};
+
+    let module_id = |path: &Path| -> Result<String, ToolError> {
+        id_of.get(&normalize(path)).cloned().ok_or_else(|| {
+            ToolError(format!(
+                "cannot bundle {} for the studio suite: it is not in the computed require closure",
+                path.display()
+            ))
+        })
+    };
+
+    out.push_str("-- Entrypoint: stream each spec's events as sentinel-framed print lines.\n");
+    out.push_str(&format!("local Lest = __lest_require('{core_id}')\n"));
+    out.push_str(&format!(
+        "local Scheduler = __lest_require('{SCHEDULER_ID}')\n"
+    ));
+    out.push_str(&format!(
+        "local Sanitize = __lest_require('{SANITIZE_ID}')\n"
+    ));
+    out.push_str("local __lest_http = game:GetService('HttpService')\n");
+    out.push_str(&format!(
+        "local function __lest_emit (event)\n\tprint('{SENTINEL}' .. __lest_http:JSONEncode(Sanitize.value(event)))\nend\n"
+    ));
+
+    out.push_str("local __lest_specs = {\n");
+    for spec in input.specs {
+        let spec_id = module_id(&spec.path)?;
+        out.push_str(&format!(
+            "\t{{ name = '{}', load = function () return __lest_require('{spec_id}') end }},\n",
+            luau_escape(&spec.name),
+        ));
+    }
+    out.push_str("}\n");
+
+    let name_filter = match input.name_filter {
+        Some(filter) => format!("'{}'", luau_escape(filter)),
+        None => "nil".to_string(),
+    };
+
+    // The same load/timeout/error synthesis as the cloud head; the boundary
+    // marker is 1-based, matching the spawned-runtime harness the decoder
+    // already parses.
+    out.push_str(&format!(
+        r#"for __lest_index, spec in __lest_specs do
+	print('{spec_sentinel}' .. tostring(__lest_index))
+	Lest.reset()
+	local ok, err = pcall(spec.load)
+	if not ok then
+		__lest_emit({{
+			kind = 'test_fail', path = {{ spec.name }}, name = '(load)',
+			durationMs = 0,
+			failure = {{ type = 'error', message = tostring(err), trace = '' }},
+		}})
+	else
+		local result = Scheduler.runSuite(function ()
+			Lest.run(__lest_emit, {{ nameFilter = {name_filter} }})
+		end, {{ task = task, deadlineMs = {deadline} }})
+		if result.timedOut then
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(timeout)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = 'spec exceeded its deadline', trace = '' }},
+			}})
+		elseif result.error ~= nil then
+			-- Same guard as the cloud head: a captured mid-run error must
+			-- surface, or the remaining tests vanish behind a green run.
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(error)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = tostring(result.error), trace = '' }},
+			}})
+		end
+	end
+end
+print('{done_sentinel}')
+"#,
+        spec_sentinel = SPEC_SENTINEL,
+        done_sentinel = DONE_SENTINEL,
+        deadline = input.deadline_ms,
+    ));
+
+    Ok(())
+}
+
 /// One module of the CLI-embedded in-engine runtime.
 struct EmbeddedModule {
     /// Base name, matched against `require('./name')` / `require('@self/name')`.
@@ -441,6 +543,7 @@ struct EmbeddedModule {
 
 const COLLECTOR_ID: &str = "lr_collector";
 const SCHEDULER_ID: &str = "lr_scheduler";
+const SANITIZE_ID: &str = "lr_sanitize";
 
 /// The in-engine runtime the cloud entrypoint drives: a collector that buffers
 /// protocol events for the task to return, the task-scheduler integration that
@@ -771,6 +874,46 @@ mod tests {
 
     fn core_entry(root: &Path) -> PathBuf {
         root.join("luau/core/init.luau")
+    }
+
+    #[test]
+    fn studio_head_streams_sentinel_lines_instead_of_returning() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        let specs = vec![SpecEntry {
+            name: "tests/core/expect.spec".to_string(),
+            path: spec.clone(),
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: Some("only these"),
+            head: Head::Studio,
+            deadline_ms: 1234,
+            place: None,
+        };
+        let bundle = bundle(&input).expect("bundle should succeed");
+        let script = bundle.script;
+
+        // The studio tail prints framed events and a done marker; nothing is
+        // returned and no collector is constructed.
+        assert!(script.contains(crate::backend::runtime::SENTINEL));
+        assert!(script.contains(crate::backend::runtime::SPEC_SENTINEL));
+        assert!(script.contains(crate::backend::runtime::DONE_SENTINEL));
+        assert!(script.contains("JSONEncode(Sanitize.value(event))"));
+        assert!(!script.contains("return collector.events()"));
+        assert!(!script.contains("Collector.new()"));
+        // Shared machinery is still there: scheduler deadline, name filter,
+        // per-spec load, and the embedded runtime modules.
+        assert!(script.contains("Scheduler.runSuite"));
+        assert!(script.contains("deadlineMs = 1234"));
+        assert!(script.contains("'only these'"));
+        for id in ["lr_scheduler", "lr_sanitize"] {
+            assert!(
+                script.contains(&format!("__lest_modules['{id}']")),
+                "embedded module {id} must inline"
+            );
+        }
     }
 
     #[test]

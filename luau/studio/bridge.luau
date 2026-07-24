@@ -45,6 +45,27 @@ export type RequestResult = {
 	error: string?,
 }
 
+--- Engine hooks for run jobs, implemented by main.luau against the real
+--- engine and by scripted fakes in the specs. `nil` on hosts that cannot
+--- run suites — the bridge then refuses run jobs with a clear error.
+export type RunHooks = {
+	--- Parent the bundle as an injected Script. `false` plus a reason on
+	--- failure (no Script Injection permission, say).
+	inject: (source: string) -> (boolean, string?),
+	--- Attempt to start the playtest and report whether the world is now
+	--- running. Expected to fail on today's platform (the Run() API is a
+	--- no-op from plugin-adjacent contexts); the user's Run press is the
+	--- fallback, which `isRunning` observes.
+	tryStart: () -> boolean,
+	--- Attempt to stop the playtest; report whether it is now stopped.
+	tryStop: () -> boolean,
+	isRunning: () -> boolean,
+	--- Remove whatever `inject` created (injected instances survive Stop).
+	cleanup: () -> (),
+	--- Subscribe to log lines (LogService); returns the disconnect.
+	connectLog: (callback: (message: string) -> ()) -> () -> (),
+}
+
 export type Deps = {
 	request: (options: RequestOptions) -> RequestResult,
 	encode: (value: any) -> string,
@@ -53,6 +74,9 @@ export type Deps = {
 	log: (message: string) -> (),
 	warn: (message: string) -> (),
 	place: () -> { name: string, placeId: number },
+	--- Monotonic seconds (os.clock); drives the run keepalive cadence.
+	clock: () -> number,
+	run: RunHooks?,
 }
 
 --- Baked into the installed plugin by `lest studio install` (main.luau holds
@@ -73,6 +97,15 @@ export type Bridge = {
 --- Delay after a healthy contact (an idle 204 or a decoded job): the server
 --- side long-polls, so the next request can go straight back out.
 local POLL_IDLE = 0.1
+--- Step cadence while a run is active: fast enough that event batches feel
+--- live in the terminal, slow enough to stay far inside the HTTP budget.
+local RUN_POLL = 0.2
+--- With no lines to flush, an empty `/events` post goes out this often —
+--- the CLI's liveness signal, and the plugin's way of noticing a dead CLI.
+local KEEPALIVE_SECONDS = 2
+--- Consecutive failed posts before the plugin declares the CLI dead and
+--- aborts the run (stop, clean up, back to idle polling).
+local MAX_POST_FAILURES = 3
 --- First retry delay after any unhealthy poll; doubles per consecutive one.
 local BACKOFF_START = 0.5
 --- Ceiling when nothing is listening at all. Kept low — a connection refusal
@@ -163,10 +196,24 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 		end
 	end
 
-	--- Answers one decoded job. Every known kind posts a `/result` addressed
-	--- by the job's id; unknown kinds post a refusal that names the plugin
-	--- version, so a newer CLI talking to an older plugin fails loudly with
-	--- the fix visible (`lest studio install` again) instead of hanging.
+	--- POSTs a JSON payload; true when the server acknowledged it.
+	local function postJson (path: string, payload: { [string]: any }): boolean
+		local postHeaders = headers()
+		postHeaders['content-type'] = 'application/json'
+		local result = deps.request({
+			method = 'POST',
+			url = url(path),
+			headers = postHeaders,
+			body = deps.encode(payload),
+		})
+		return result.ok and (result.status == 200 or result.status == 204)
+	end
+
+	--- Answers one decoded non-run job. Every known kind posts a `/result`
+	--- addressed by the job's id; unknown kinds post a refusal that names the
+	--- plugin version, so a newer CLI talking to an older plugin fails loudly
+	--- with the fix visible (`lest studio install` again) instead of hanging.
+	--- A failed post means the session died mid-job; the next poll notices.
 	local function answer (job: { [string]: any })
 		local payload: { [string]: any }
 		if job.kind == 'ping' then
@@ -183,19 +230,154 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 				error = `unsupported job kind '{tostring(job.kind)}' — plugin {config.version} predates it; run \`lest studio install\` to update`,
 			}
 		end
-		local postHeaders = headers()
-		postHeaders['content-type'] = 'application/json'
-		-- A failed result post means the session died mid-job; the next poll
-		-- notices and handles the disconnect, so nothing to do here.
-		deps.request({
-			method = 'POST',
-			url = url('/result'),
-			headers = postHeaders,
-			body = deps.encode(payload),
-		})
+		postJson('/result', payload)
+	end
+
+	-- The in-flight run, if any. One at a time: the CLI serializes suites
+	-- over one bridge session, so a second run job during one is refused.
+	type ActiveRun = {
+		id: string,
+		disconnect: () -> (),
+		buffer: { string },
+		markers: { event: string, spec: string, done: string },
+		done: boolean,
+		lastPost: number,
+		postFailures: number,
+	}
+	local active: ActiveRun? = nil
+
+	local function lineHasMarker (run: ActiveRun, message: string): boolean
+		return string.find(message, run.markers.event, 1, true) ~= nil
+			or string.find(message, run.markers.spec, 1, true) ~= nil
+			or string.find(message, run.markers.done, 1, true) ~= nil
+	end
+
+	--- Starts a run job: subscribe to the log relay, inject the bundle,
+	--- attempt the adaptive start, and acknowledge with whether the world is
+	--- already running (`started = false` means the user's Run press starts
+	--- it). Marker strings ride in the job payload, so the plugin never
+	--- hardcodes them and cannot drift from the CLI's decoder.
+	local function startRun (job: { [string]: any }): number
+		local hooks = deps.run
+		if hooks == nil then
+			postJson('/result', {
+				id = job.id,
+				ok = false,
+				error = 'this host cannot run suites (no engine hooks)',
+			})
+			return POLL_IDLE
+		end
+		if active ~= nil then
+			postJson('/result', { id = job.id, ok = false, error = 'a run is already in progress' })
+			return POLL_IDLE
+		end
+		local markers = job.markers
+		if
+			type(job.bundle) ~= 'string'
+			or type(markers) ~= 'table'
+			or type(markers.event) ~= 'string'
+			or type(markers.spec) ~= 'string'
+			or type(markers.done) ~= 'string'
+		then
+			postJson('/result', {
+				id = job.id,
+				ok = false,
+				error = `malformed run job — plugin {config.version}; run \`lest studio install\` to update`,
+			})
+			return POLL_IDLE
+		end
+
+		local run: ActiveRun = {
+			id = job.id,
+			disconnect = function () end,
+			buffer = {},
+			markers = { event = markers.event, spec = markers.spec, done = markers.done },
+			done = false,
+			lastPost = deps.clock(),
+			postFailures = 0,
+		}
+		-- Only marker-carrying lines relay: LogService is shared with every
+		-- other plugin's chatter, and the CLI only decodes framed lines.
+		run.disconnect = hooks.connectLog(function (message)
+			if not lineHasMarker(run, message) then
+				return
+			end
+			table.insert(run.buffer, message)
+			if string.find(message, run.markers.done, 1, true) ~= nil then
+				run.done = true
+			end
+		end)
+
+		local injected, reason = hooks.inject(job.bundle)
+		if not injected then
+			run.disconnect()
+			postJson('/result', {
+				id = job.id,
+				ok = false,
+				error = 'cannot inject the test bundle: ' .. tostring(reason),
+			})
+			return POLL_IDLE
+		end
+
+		local started = hooks.tryStart()
+		if not started then
+			deps.log('lest run armed — press Run (F8) in Studio to execute the suite')
+		end
+		active = run
+		postJson('/result', { id = job.id, ok = true, started = started })
+		return RUN_POLL
+	end
+
+	--- Ends a run and restores idle state, stopping the world and removing
+	--- the injected script. Shared by completion and CLI-death abort.
+	local function teardown (run: ActiveRun): boolean
+		local hooks = deps.run :: RunHooks
+		local stopped = if hooks.isRunning() then hooks.tryStop() else true
+		run.disconnect()
+		hooks.cleanup()
+		active = nil
+		return stopped
+	end
+
+	--- One management step of the active run: flush buffered lines (or a
+	--- keepalive), detect a dead CLI, and finish when the done marker has
+	--- been seen and fully relayed.
+	local function manageRun (): number
+		local run = active :: ActiveRun
+		local doneBeforeFlush = run.done
+		local lines = run.buffer
+		if #lines > 0 or (deps.clock() - run.lastPost) >= KEEPALIVE_SECONDS then
+			run.buffer = {}
+			run.lastPost = deps.clock()
+			if postJson('/events', { id = run.id, lines = lines }) then
+				run.postFailures = 0
+			else
+				run.postFailures += 1
+				if run.postFailures >= MAX_POST_FAILURES then
+					deps.warn('lest lost its CLI session mid-run — stopping the playtest and cleaning up')
+					local _ = teardown(run)
+					return failedPoll()
+				end
+			end
+		end
+		-- Late lines land in the fresh buffer during the flush's yield and
+		-- go out next step; finishing waits until everything relayed.
+		if doneBeforeFlush and #run.buffer == 0 and run.postFailures == 0 then
+			local stopped = teardown(run)
+			if not stopped then
+				deps.log('lest run finished — press Stop in Studio to end the playtest')
+			end
+			postJson('/done', { id = run.id, ok = true, stopped = stopped })
+			return POLL_IDLE
+		end
+		return RUN_POLL
 	end
 
 	local function step (): number
+		if active ~= nil then
+			return manageRun()
+		end
+
 		local result = deps.request({
 			method = 'GET',
 			url = url('/job'),
@@ -260,6 +442,9 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 		end
 
 		contacted()
+		if job.kind == 'run' then
+			return startRun(job)
+		end
 		answer(job)
 		return POLL_IDLE
 	end
