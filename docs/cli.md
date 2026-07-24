@@ -69,7 +69,7 @@ than accepted and ignored.
 #### `--backend <BACKEND>`
 
 Force every selected suite onto one backend for this run: `native`, `lune`,
-`lute`, or `cloud`. A debugging override — see
+`lute`, `cloud`, or `studio`. A debugging override — see
 [Backends](backends.md#overriding-a-backend).
 
 ### Watch mode
@@ -87,12 +87,12 @@ Watch mode is graph-driven, not glob-driven. Saving a file invalidates its
 content hash; the inverted require graph then yields exactly the specs whose
 transitive requires touched it, and only those re-run. Watching is debounced,
 hidden files are ignored (except `.luaurc`, which affects resolution), and
-`cloud` suites are always excluded — the fast loop never waits on the network.
+`cloud` and `studio` suites are always excluded — the fast loop never waits on a network round-trip or a Studio boot.
 
 At startup and after every pass, a dim banner marks the loop as alive:
 
 ```console
-watching /path/to/project — save a file to re-run (ctrl+c to quit)
+Watching /path/to/project — save a file to re-run (ctrl+c to quit)
 ```
 
 Saving `lest.toml` reloads the configuration. If the fresh config fails to load
@@ -123,8 +123,8 @@ produced it, tagging each suite's section with the environment it ran in.
 Alongside the report itself, the CLI speaks in exactly two voices on stderr:
 **diagnostics** — a colored bold label followed by a capitalized sentence with
 no trailing period (`Error:` and `Failure:` in bold red, `Warning:` in bold
-yellow, e.g. `Error: This is the error`) — and **notes**, dim lowercase
-fragments. There is no `lest:` prefix anywhere.
+yellow, e.g. `Error: This is the error`) — and **notes**, dim capitalized
+sentences with no trailing period. There is no `lest:` prefix anywhere.
 
 #### `--no-color`
 
@@ -196,20 +196,6 @@ $ lest self uninstall    # remove it from PATH and delete ~/.lest/bin
 On Windows the user `PATH` is edited in the registry with its value kind
 preserved, so `%VAR%`-style (`REG_EXPAND_SZ`) entries keep expanding instead of
 being baked into whatever they expanded to that day.
-
-## `lest studio`
-
-```console
-$ lest studio install    # write the companion plugin into Roblox Studio's Plugins folder
-$ lest studio status     # install state, plus a live Studio session check
-$ lest studio uninstall  # remove the plugin (only if lest wrote it)
-```
-
-`install` accepts `--port <PORT>` (outranks `[studio] port` in lest.toml) and
-`--force` (replace a plugin file lest does not recognize as its own; without
-it, foreign files are refused). Windows and macOS only — Studio does not run
-elsewhere. See **[Studio](studio.md)** for the permission walkthrough and
-where this is heading; the studio backend itself is in development.
 
 ## Exit codes
 

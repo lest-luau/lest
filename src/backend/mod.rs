@@ -6,6 +6,7 @@ use crate::report::{Event, Failure};
 pub mod cloud;
 pub mod native;
 pub mod runtime;
+pub mod studio;
 
 /// The sink a backend streams protocol events into. The first argument is the
 /// originating spec file when the backend can attribute it (always for native,
@@ -37,6 +38,9 @@ pub struct SuitePlan {
     /// maps into the place delegate to the engine's `require` instead of
     /// bundling a private copy.
     pub rojo_project: Option<PathBuf>,
+    /// `[studio] executable` — the Roblox Studio binary, for non-standard
+    /// installs. Only the studio backend consults it.
+    pub studio_executable: Option<PathBuf>,
 }
 
 /// Root-relative display form of a spec path, with forward slashes.

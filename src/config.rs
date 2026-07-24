@@ -17,6 +17,8 @@ pub enum BackendKind {
     Lune,
     Lute,
     Cloud,
+    /// Roblox Studio, launched per run via its official CLI.
+    Studio,
 }
 
 impl fmt::Display for BackendKind {
@@ -26,6 +28,7 @@ impl fmt::Display for BackendKind {
             BackendKind::Lune => "lune",
             BackendKind::Lute => "lute",
             BackendKind::Cloud => "cloud",
+            BackendKind::Studio => "studio",
         };
         f.write_str(name)
     }
@@ -49,12 +52,11 @@ struct RawConfig {
     studio: RawStudio,
 }
 
-/// The `[studio]` table: local-session settings for the Studio companion
-/// plugin. Only the bridge port today; non-secret by construction (the
-/// session secret lives in the user-level stamp, never in config).
+/// The `[studio]` table: settings for launching Roblox Studio. Only the
+/// executable override today (for non-standard install locations).
 #[derive(Debug, Default, Deserialize)]
 struct RawStudio {
-    port: Option<u16>,
+    executable: Option<String>,
 }
 
 /// Open Cloud target for cloud-backend suites. `universe_id`/`place_id` are
@@ -128,7 +130,8 @@ pub struct Suite {
     /// CI is detected.
     pub default_enabled: bool,
     /// Per-suite Open Cloud overrides; falls back to the top-level `[cloud]`
-    /// block when a field is unset. Only consulted for cloud-backend suites.
+    /// block when a field is unset. Consulted by the cloud backend and, for
+    /// its place selection, the studio backend.
     pub cloud: CloudTarget,
 }
 
@@ -161,10 +164,9 @@ pub struct Config {
     pub rojo: Option<String>,
     /// Coverage settings (native suites only).
     pub coverage: Coverage,
-    /// `[studio] port` — the bridge port `lest studio install` bakes into the
-    /// companion plugin. `None` means the flag, an existing install, or the
-    /// built-in default decides (in that order).
-    pub studio_port: Option<u16>,
+    /// `[studio] executable` — a path to the Roblox Studio binary, for
+    /// non-standard installs. `None` means the platform default location.
+    pub studio_executable: Option<String>,
     /// The `lest.toml` this config was read from, or `None` in zero-config
     /// mode. Carried so callers can point at the real file (watch mode watches
     /// it by identity; the empty-discovery message only mentions a config file
@@ -278,7 +280,7 @@ fn unknown_keys(text: &str) -> Vec<String> {
     const SETTINGS: &[&str] = &["timeout_ms", "workers", "rojo", "core"];
     const COVERAGE: &[&str] = &["exclude", "min"];
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
-    const STUDIO: &[&str] = &["port"];
+    const STUDIO: &[&str] = &["executable"];
 
     fn collect(prefix: &str, table: &toml::Table, known: &[&str], out: &mut Vec<String>) {
         for key in table.keys() {
@@ -402,7 +404,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         core: raw.settings.core,
         rojo: raw.settings.rojo,
         coverage,
-        studio_port: raw.studio.port,
+        studio_executable: raw.studio.executable,
         // Filled in by `load`, which is the only place that knows the path.
         file: None,
     })
@@ -556,24 +558,27 @@ mod tests {
     }
 
     #[test]
-    fn studio_port_is_parsed_and_defaults_to_none() {
+    fn studio_executable_is_parsed_and_defaults_to_none() {
         let config = parse(
             r#"
             [suites.unit]
             include = ["src/**/*.spec.luau"]
 
             [studio]
-            port = 41999
+            executable = "C:/Tools/RobloxStudioBeta.exe"
             "#,
         );
-        assert_eq!(config.studio_port, Some(41999));
+        assert_eq!(
+            config.studio_executable.as_deref(),
+            Some("C:/Tools/RobloxStudioBeta.exe")
+        );
         let config = parse(
             r#"
             [suites.unit]
             include = ["src/**/*.spec.luau"]
             "#,
         );
-        assert_eq!(config.studio_port, None);
+        assert_eq!(config.studio_executable, None);
     }
 
     #[test]
@@ -581,10 +586,10 @@ mod tests {
         let found = unknown_keys(
             r#"
             [studio]
-            prot = 41999
+            excutable = "x"
             "#,
         );
-        assert_eq!(found, vec!["studio.prot".to_string()]);
+        assert_eq!(found, vec!["studio.excutable".to_string()]);
     }
 
     /// A typo'd key parses fine and does nothing, which is the failure mode

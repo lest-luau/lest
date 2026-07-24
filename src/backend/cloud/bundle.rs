@@ -130,11 +130,28 @@ fn brief_reason(error: &ResolveError) -> String {
     }
 }
 
+/// Which entrypoint tail the bundle ends with. The module factories, require
+/// shim, and source map are identical for every consumer; only the code that
+/// *drives* the suite differs per execution environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Head {
+    /// Open Cloud task: events buffer in the embedded collector and the task
+    /// returns them as JSON (`output.results[0]`).
+    Cloud,
+    /// Launched Studio run: events print as sentinel-framed lines into the
+    /// output file `--task RunScript` writes, decoded by the CLI afterward.
+    /// A done marker after the last spec is the completion authority — a
+    /// GUI quit is a weaker signal than a process exit.
+    Studio,
+}
+
 /// Everything the bundler needs to emit one self-contained entrypoint.
 pub struct BundleInput<'a> {
     pub core_entry: &'a Path,
     pub specs: &'a [SpecEntry],
     pub name_filter: Option<&'a str>,
+    /// The entrypoint tail to emit; see [`Head`].
+    pub head: Head,
     /// Per-spec scheduler deadline inside the engine, in milliseconds.
     pub deadline_ms: u64,
     /// The rojo project mapping (`[settings] rojo`), when configured. A string
@@ -318,7 +335,38 @@ pub fn bundle_with_cache(
 
     // ── Entrypoint ──────────────────────────────────────────────────────────
     let core_id = module_id(&core)?;
+    match input.head {
+        Head::Cloud => emit_cloud_head(&mut out, input, &core_id, &id_of)?,
+        Head::Studio => emit_studio_head(&mut out, input, &core_id, &id_of)?,
+    }
 
+    Ok(Bundle {
+        script: out,
+        unresolved,
+        source_map,
+    })
+}
+
+/// The Open Cloud entrypoint tail: drive every spec through the embedded
+/// collector and scheduler, then return the buffered events as the task
+/// result. Appended after every module factory, so none of these lines carry
+/// source-map entries (scaffolding belongs to no module).
+fn emit_cloud_head(
+    out: &mut String,
+    input: &BundleInput,
+    core_id: &str,
+    id_of: &BTreeMap<PathBuf, String>,
+) -> Result<(), ToolError> {
+    // The same lookup `bundle_with_cache` uses; a spec missing from its own
+    // closure is a bundler bug surfaced as a tool error, not a panic.
+    let module_id = |path: &Path| -> Result<String, ToolError> {
+        id_of.get(&normalize(path)).cloned().ok_or_else(|| {
+            ToolError(format!(
+                "cannot bundle {} for the cloud suite: it is not in the computed require closure",
+                path.display()
+            ))
+        })
+    };
     out.push_str(
         "-- Entrypoint: run each spec through the embedded collector, return its events.\n",
     );
@@ -386,11 +434,115 @@ return collector.events()
         deadline = input.deadline_ms,
     ));
 
-    Ok(Bundle {
-        script: out,
-        unresolved,
-        source_map,
-    })
+    Ok(())
+}
+
+/// A marker as split Luau string concatenation, so the generated source
+/// never contains the complete marker text. Studio dumps an erroring
+/// script's source into the same output channel the markers frame, and a
+/// source line carrying a whole marker would decode as a broken event —
+/// the harness template's never-spell-a-complete-marker rule, applied to
+/// codegen.
+fn split_marker(marker: &str) -> String {
+    let mid = marker.len() / 2;
+    format!("'{}' .. '{}'", &marker[..mid], &marker[mid..])
+}
+
+/// The studio entrypoint tail: the same per-spec drive as the cloud head,
+/// but events leave as sentinel-framed `print` lines (the spawned-runtime
+/// framing, decoded by the same CLI code) instead of buffering for a task
+/// return. Sanitize keeps every event JSON-encodable; the engine's
+/// `HttpService:JSONEncode` does the encoding, since an injected server
+/// Script always has it.
+fn emit_studio_head(
+    out: &mut String,
+    input: &BundleInput,
+    core_id: &str,
+    id_of: &BTreeMap<PathBuf, String>,
+) -> Result<(), ToolError> {
+    use crate::backend::runtime::{DONE_SENTINEL, SENTINEL, SPEC_SENTINEL};
+
+    let module_id = |path: &Path| -> Result<String, ToolError> {
+        id_of.get(&normalize(path)).cloned().ok_or_else(|| {
+            ToolError(format!(
+                "cannot bundle {} for the studio suite: it is not in the computed require closure",
+                path.display()
+            ))
+        })
+    };
+
+    out.push_str("-- Entrypoint: stream each spec's events as sentinel-framed print lines.\n");
+    out.push_str(&format!("local Lest = __lest_require('{core_id}')\n"));
+    out.push_str(&format!(
+        "local Scheduler = __lest_require('{SCHEDULER_ID}')\n"
+    ));
+    out.push_str(&format!(
+        "local Sanitize = __lest_require('{SANITIZE_ID}')\n"
+    ));
+    out.push_str("local __lest_http = game:GetService('HttpService')\n");
+    out.push_str(&format!(
+        "local function __lest_emit (event)\n\tprint({sent} .. __lest_http:JSONEncode(Sanitize.value(event)))\nend\n",
+        sent = split_marker(SENTINEL)
+    ));
+
+    out.push_str("local __lest_specs = {\n");
+    for spec in input.specs {
+        let spec_id = module_id(&spec.path)?;
+        out.push_str(&format!(
+            "\t{{ name = '{}', load = function () return __lest_require('{spec_id}') end }},\n",
+            luau_escape(&spec.name),
+        ));
+    }
+    out.push_str("}\n");
+
+    let name_filter = match input.name_filter {
+        Some(filter) => format!("'{}'", luau_escape(filter)),
+        None => "nil".to_string(),
+    };
+
+    // The same load/timeout/error synthesis as the cloud head; the boundary
+    // marker is 1-based, matching the spawned-runtime harness the decoder
+    // already parses.
+    out.push_str(&format!(
+        r#"for __lest_index, spec in __lest_specs do
+	print({spec_sentinel} .. tostring(__lest_index))
+	Lest.reset()
+	local ok, err = pcall(spec.load)
+	if not ok then
+		__lest_emit({{
+			kind = 'test_fail', path = {{ spec.name }}, name = '(load)',
+			durationMs = 0,
+			failure = {{ type = 'error', message = tostring(err), trace = '' }},
+		}})
+	else
+		local result = Scheduler.runSuite(function ()
+			Lest.run(__lest_emit, {{ nameFilter = {name_filter} }})
+		end, {{ task = task, deadlineMs = {deadline} }})
+		if result.timedOut then
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(timeout)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = 'spec exceeded its deadline', trace = '' }},
+			}})
+		elseif result.error ~= nil then
+			-- Same guard as the cloud head: a captured mid-run error must
+			-- surface, or the remaining tests vanish behind a green run.
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(error)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = tostring(result.error), trace = '' }},
+			}})
+		end
+	end
+end
+print({done_sentinel})
+"#,
+        spec_sentinel = split_marker(SPEC_SENTINEL),
+        done_sentinel = split_marker(DONE_SENTINEL),
+        deadline = input.deadline_ms,
+    ));
+
+    Ok(())
 }
 
 /// One module of the CLI-embedded in-engine runtime.
@@ -403,6 +555,7 @@ struct EmbeddedModule {
 
 const COLLECTOR_ID: &str = "lr_collector";
 const SCHEDULER_ID: &str = "lr_scheduler";
+const SANITIZE_ID: &str = "lr_sanitize";
 
 /// The in-engine runtime the cloud entrypoint drives: a collector that buffers
 /// protocol events for the task to return, the task-scheduler integration that
@@ -736,6 +889,53 @@ mod tests {
     }
 
     #[test]
+    fn studio_head_streams_sentinel_lines_instead_of_returning() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        let specs = vec![SpecEntry {
+            name: "tests/core/expect.spec".to_string(),
+            path: spec.clone(),
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: Some("only these"),
+            head: Head::Studio,
+            deadline_ms: 1234,
+            place: None,
+        };
+        let bundle = bundle(&input).expect("bundle should succeed");
+        let script = bundle.script;
+
+        // The studio tail prints framed events and a done marker; the cloud
+        // entrypoint (and its collector return) is absent. Matched on the
+        // entry banners: the embedded collector module's own doc comment
+        // legitimately contains collector-usage text in every bundle.
+        // The source must NOT contain any complete marker: Studio echoes
+        // erroring source into the decoded channel, and a whole marker in
+        // source would decode as a broken event. Split concatenation only.
+        assert!(!script.contains(crate::backend::runtime::SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::SPEC_SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::DONE_SENTINEL));
+        assert!(script.contains("'@@LE' .. 'ST@@'"));
+        assert!(script.contains("JSONEncode(Sanitize.value(event))"));
+        assert!(script.contains("-- Entrypoint: stream each spec's events"));
+        assert!(!script.contains("-- Entrypoint: run each spec through the embedded collector"));
+        assert!(!script.ends_with("return collector.events()\n"));
+        // Shared machinery is still there: scheduler deadline, name filter,
+        // per-spec load, and the embedded runtime modules.
+        assert!(script.contains("Scheduler.runSuite"));
+        assert!(script.contains("deadlineMs = 1234"));
+        assert!(script.contains("'only these'"));
+        for id in ["lr_scheduler", "lr_sanitize"] {
+            assert!(
+                script.contains(&format!("__lest_modules['{id}']")),
+                "embedded module {id} must inline"
+            );
+        }
+    }
+
+    #[test]
     fn bundles_real_core_and_embedded_roblox_with_a_spec() {
         let root = repo_root();
         let spec = root.join("tests/core/expect.spec.luau");
@@ -753,6 +953,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 30000,
             place: None,
         };
@@ -807,6 +1008,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 30000,
             place: None,
         };
@@ -901,6 +1103,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -953,6 +1156,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: Some(&place),
         };
@@ -993,6 +1197,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: Some(&place),
         };
@@ -1089,6 +1294,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1134,6 +1340,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1181,6 +1388,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: None,
+            head: Head::Cloud,
             deadline_ms: 1000,
             place: None,
         };
@@ -1214,6 +1422,7 @@ mod tests {
             core_entry: &core_entry(&root),
             specs: &specs,
             name_filter: Some("adds numbers"),
+            head: Head::Cloud,
             deadline_ms: 5000,
             place: None,
         };

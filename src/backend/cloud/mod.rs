@@ -31,7 +31,7 @@ use crate::config::CloudTarget;
 use crate::error::ToolError;
 
 use api::{Session, Transport, UreqTransport};
-use bundle::{BundleInput, SpecEntry};
+use bundle::{BundleInput, Head, SpecEntry};
 
 /// Environment variables holding the Open Cloud API key, in priority order.
 /// The key is a secret: read only from the environment, never config or logs.
@@ -135,6 +135,7 @@ fn run_with_transport<T: Transport>(
             core_entry: &plan.core_entry,
             specs: &specs,
             name_filter: plan.name_filter.as_deref(),
+            head: Head::Cloud,
             deadline_ms,
             place: place_map.as_ref(),
         };
@@ -215,7 +216,7 @@ fn extract_events(results: &[Value]) -> Option<Vec<Value>> {
 /// coordinate — cannot carry. A warning rather than an error because the
 /// require may be legal dead code in the engine; the shim still errs loudly
 /// if it is reached.
-fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
+pub(crate) fn unresolved_warning(miss: &bundle::UnresolvedRequire, root: &Path) -> String {
     format!(
         "the string require of '{}' at {}:{} does not resolve ({}) and is not bundled — it \
          will error if reached in the engine",
@@ -458,6 +459,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: None,
+            studio_executable: None,
         }
     }
 
@@ -552,6 +554,7 @@ mod tests {
             core_entry: &plan.core_entry,
             specs: &specs,
             name_filter: None,
+            head: bundle::Head::Cloud,
             deadline_ms: 1,
             place: None,
         };
@@ -689,6 +692,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: None,
+            studio_executable: None,
         };
         let mut sink = |_: Option<&Path>, _: &Event| {};
 
@@ -749,6 +753,7 @@ mod tests {
             name_filter: None,
             coverage: false,
             rojo_project: Some(root.join("default.project.json")),
+            studio_executable: None,
         };
         let transport = RoutedCloud::new();
         let mut sink = |_: Option<&Path>, _: &Event| {};

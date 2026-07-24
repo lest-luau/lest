@@ -19,7 +19,8 @@ pub use coverage::{CoverageData, FileCoverage};
 // one module. `render_warning` is the crate-wide way to emit a warning:
 // callers `eprint!` the result (warnings always belong on stderr).
 pub use diagnostic::{
-    note_to_stderr, render_diagnostic, render_warning, sentence, warn_to_stderr, Severity,
+    clear_stderr_note, note_to_stderr, render_diagnostic, render_warning, sentence, warn_to_stderr,
+    Severity,
 };
 pub use event::{
     check_protocol_version, Event, Failure, SnapshotMismatch, Totals, PROTOCOL_VERSION,

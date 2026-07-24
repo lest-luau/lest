@@ -86,12 +86,26 @@ pub fn warn_to_stderr(message: &str) {
     eprint!("{}", render_warning(message, stderr_color()));
 }
 
-/// Prints a note — the dim lowercase voice — to stderr, for progress from
+/// Prints a note — the dim voice — to stderr, for progress from
 /// places with no reporter handle. stderr rather than stdout because stdout
 /// belongs to the reporters: a stray line there corrupts `--reporter json`
 /// output and lcov streams.
 pub fn note_to_stderr(message: &str) {
-    eprintln!("{}", paint(stderr_color(), DIM, message));
+    // The same grammar as diagnostics — capitalized, no trailing period —
+    // in the dim voice; `sentence` is the one place both rules live.
+    eprintln!("{}", paint(stderr_color(), DIM, &sentence(message)));
+}
+
+/// Erases the most recent single-line stderr note, when stderr is a terminal
+/// that honors ANSI (the same gate as coloring). For transient status lines
+/// — "launching Roblox Studio…" — that should not outlive the moment they
+/// describe. In non-terminal stderr (CI logs, redirects) the note stays,
+/// which is exactly what a log wants; the caller need not care which
+/// happened.
+pub fn clear_stderr_note() {
+    if stderr_color() {
+        eprint!("\x1b[1A\x1b[2K");
+    }
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ const IGNORED_DIRS: &[&str] = &[
 /// no prefix, on stderr. `"2"` is the palette's `DIM` code — `report::pretty`
 /// keeps the constant private to the reporters.
 fn print_note(message: &str, color: bool) {
-    eprintln!("{}", paint(color, "2", message));
+    eprintln!("{}", paint(color, "2", &crate::report::sentence(message)));
 }
 
 /// The one watching banner, used at startup and after every pass — a single
@@ -73,7 +73,7 @@ pub fn run(
     let mut selected = watchable(select_suites(&config, suite_names, backend_override)?);
     if selected.is_empty() {
         return Err(ToolError(
-            "nothing to watch — every selected suite uses the cloud backend".to_string(),
+            "nothing to watch — every selected suite uses a backend watch cannot re-run (cloud or studio)".to_string(),
         ));
     }
 
@@ -207,8 +207,8 @@ pub fn run(
             eprint!(
                 "{}",
                 render_warning(
-                    "nothing to watch — every selected suite now uses the cloud backend; edit \
-                     lest.toml to select a watchable suite",
+                    "nothing to watch — every selected suite now uses a backend watch cannot \
+                     re-run (cloud or studio); edit lest.toml to select a watchable suite",
                     err_color,
                 )
             );
@@ -333,7 +333,9 @@ fn resolved_config_path(config: &Config, root: &Path) -> PathBuf {
 fn watchable(suites: Vec<Suite>) -> Vec<Suite> {
     suites
         .into_iter()
-        .filter(|suite| suite.backend != BackendKind::Cloud)
+        // Cloud is excluded by physics (network round-trips per save);
+        // studio too — a full Studio boot per save is no loop at all.
+        .filter(|suite| suite.backend != BackendKind::Cloud && suite.backend != BackendKind::Studio)
         .collect()
 }
 

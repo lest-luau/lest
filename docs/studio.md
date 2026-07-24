@@ -1,86 +1,86 @@
 # Studio
 
-The **studio backend is under construction**: it will run engine suites in a
-live Roblox Studio session — the same specs the cloud backend runs headless,
-executed in a local playtest with results streaming back to your terminal.
-It lands in stages; what works today is the **companion plugin and its
-installer**, documented here. This page grows as the backend does.
-
-The design in one paragraph: you keep Studio open with your place, like you
-already do while developing. A small companion plugin — installed once,
-described below — polls a loopback bridge that the lest CLI opens during a
-run. When a studio-backend run starts, the CLI hands the plugin your bundled
-specs, the plugin runs them in a playtest, and every event streams back into
-the same reporters every other backend feeds. Nothing is mocked; the tests
-run in the real engine. In CI, engine suites keep using the
-[cloud backend](backends.md#cloud) — studio is for the local loop.
-
-## Installing the plugin
+The studio backend runs engine suites by **launching Roblox Studio** through
+its official command-line interface: lest bundles your specs, starts Studio
+on your configured place with `--task RunScript`, waits for the run to
+finish, and decodes the results from Studio's output file. Zero clicks —
+no plugin to install, no permission prompts, nothing to set up beyond a
+place to run against. Nothing is mocked; the tests run in the real engine.
 
 ```console
-$ lest studio install
+$ lest run engine --backend studio
 ```
 
-This writes `lest.rbxmx` into your Roblox Studio local Plugins folder
-(`%LOCALAPPDATA%\Roblox\Plugins` on Windows, `~/Documents/Roblox/Plugins` on
-macOS). There is nothing to download and nothing from the Creator Store: the
-plugin ships inside the lest binary, and the installer stamps what it wrote
-so upgrades and repairs are automatic — re-run `lest studio install` after
-updating lest and the plugin follows.
-
-The first time the plugin is active in Studio you'll see one or two one-time
-permission prompts:
-
-1. **HTTP requests** — the plugin talks to the lest CLI on `127.0.0.1` and
-   nowhere else. Allow it under *Plugin Management* when Studio asks.
-2. **Script Injection** — not used yet; when the studio backend's run
-   support lands, this is how a run's test bundle enters the place.
-
-Until a lest CLI session is running, the plugin does nothing but quietly
-retry its local connection with a growing backoff — an idle Studio costs
-nothing.
-
-## Checking and removing
-
-```console
-$ lest studio status     # install state, plus a live-session check
-$ lest studio uninstall  # removes the plugin (only if lest wrote it)
+```toml
+[suites.engine]
+include = ["tests/engine/**/*.spec.luau"]
+backend = "cloud"           # CI stays on cloud
+default = false
 ```
 
-`status` also probes for a live session: it briefly opens the bridge port
-and waits a few seconds for the plugin to poll. With Studio open (and the
-HTTP permission granted) it reports the place and plugin version:
+In CI, engine suites keep using the [cloud backend](backends.md#cloud) —
+the studio backend launches the Studio application and refuses to run under
+`$CI` on purpose.
 
-```console
-$ lest studio status
-Installed at C:\...\Plugins\lest.rbxmx (lest 0.3.0, port 28806).
-Live session: "My Game" (place 12345), plugin 0.3.0.
+## What a run looks like
+
+1. lest bundles the suite (the same bundling and `[settings] rojo`
+   delegation the cloud backend uses) and launches Studio on the place.
+2. Studio boots, loads the place, executes the suite, writes its output,
+   and quits itself.
+3. lest decodes the output: the same tree, diffs, snapshot behavior, and
+   exit codes as every other backend.
+
+Honest costs, stated plainly:
+
+- **Every run pays a Studio boot** — typically 15–45 seconds before the
+  suite even starts. The per-run budget allows 180 seconds for the boot on
+  top of the per-spec timeouts.
+- The suite runs against the **place you configured** — a built place file
+  or a published place — never an unsaved session you happen to have open.
+- Execution uses Studio's RunScript context: real engine APIs, real
+  Instances and services, but not a stepping Run-mode playtest.
+- Watch mode does not include studio suites (a boot per save is unusable).
+
+## Choosing the place
+
+The launch needs a place. In order of preference:
+
+```toml
+[cloud]
+place_file = "test-place.rbxl"   # a built local place file (recommended)
 ```
 
-With two Studio instances open, `status` reports whichever answered first.
+or, for a published place:
 
-`install` and `uninstall` refuse to touch a `lest.rbxmx` they don't
-recognize as lest's own (`--force` overrides for install).
+```toml
+[cloud]
+universe_id = 1234567890
+place_id = 9876543210
+```
 
-## The bridge port
+These are the same keys the cloud backend uses — one `[cloud]` block serves
+both backends, which is the point: the same engine suite runs via studio
+locally and via cloud in CI.
 
-The plugin and CLI meet on a loopback port, `28806` by default. Override it
-if something else owns that port:
+## Finding Studio
+
+lest looks for Studio in the platform's standard install location
+(`%LOCALAPPDATA%\Roblox\Versions\...` on Windows, `/Applications` on
+macOS). For non-standard installs:
 
 ```toml
 [studio]
-port = 41999
+executable = "D:/Custom/RobloxStudioBeta.exe"
 ```
 
-or per install with `lest studio install --port 41999`. The port is baked
-into the installed plugin, so changing it means re-running the install;
-re-installs without a port keep whatever the existing install used.
+## Troubleshooting
 
-## Scope and honesty
-
-- Studio must be open with your place for studio runs to work; that
-  persistent session is what will make the loop fast (no per-run boot).
-- Playtests run in **Run mode** (server simulation). Tests that need a
-  `Player` and character are out of scope — that fidelity line is the same
-  one the [no-emulation rule](backends.md) draws everywhere else.
-- The studio backend will never be a CI backend; cloud owns CI.
+- **The run times out with nothing decoded** — Studio may be sitting on a
+  login screen or a modal dialog. Launch Studio by hand once, sign in, and
+  re-run.
+- **"exited without completing"** — the bundle failed to load; the error
+  points at the kept output file, and Studio's own output is usually the
+  fastest diagnosis.
+- lest keeps `.lest/studio-run.luau` and `.lest/studio-output.log` after a
+  failure for inspection, and removes them after a success.

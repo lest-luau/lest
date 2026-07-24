@@ -30,8 +30,17 @@ use crate::resolve::Runtime;
 use crate::backend::{display_rel, require_string, EventSink, SuitePlan};
 use crate::error::ToolError;
 
-const SENTINEL: &str = "@@LEST@@";
-const SPEC_SENTINEL: &str = "@@LEST_SPEC@@";
+// `pub(crate)`: the studio backend frames its output file with the same
+// markers, so the decode path is shared rather than duplicated.
+pub(crate) const SENTINEL: &str = "@@LEST@@";
+pub(crate) const SPEC_SENTINEL: &str = "@@LEST_SPEC@@";
+/// The studio run's terminal marker: printed once after the last spec so
+/// the CLI can tell a completed suite from one whose Studio process merely
+/// exited (a GUI quit proves far less than a CLI runtime's exit does).
+/// `classify` never sees it — the studio path drops done-framed lines
+/// before classifying, using its own first-marker-wins rule, so a payload
+/// containing this text cannot forge completion.
+pub(crate) const DONE_SENTINEL: &str = "@@LEST_STUDIO_DONE@@";
 const HARNESS_TEMPLATE: &str = include_str!("../../luau/runtime/harness.luau");
 
 /// How many trailing stderr lines are retained for diagnosing a process that
@@ -55,7 +64,7 @@ fn install_hint(runtime: Runtime) -> &'static str {
 /// What one line of runtime stdout turned out to be, with any text preceding
 /// the marker kept so it can still be shown.
 #[derive(Debug, PartialEq, Eq)]
-enum Decoded<'a> {
+pub(crate) enum Decoded<'a> {
     /// A spec-boundary marker carrying its (untrimmed) index text.
     SpecBoundary { leading: &'a str, index: &'a str },
     /// A protocol event carrying its JSON payload.
@@ -83,7 +92,7 @@ enum Decoded<'a> {
 /// the tail happened to parse as an index. On a tie at the same position the
 /// longer marker wins (the two differ within their first eight bytes, so a tie
 /// cannot actually occur — the rule is stated for whoever adds a third marker).
-fn classify(line: &str) -> Decoded<'_> {
+pub(crate) fn classify(line: &str) -> Decoded<'_> {
     let spec_at = line.find(SPEC_SENTINEL);
     let event_at = line.find(SENTINEL);
     match (spec_at, event_at) {
@@ -105,7 +114,7 @@ fn classify(line: &str) -> Decoded<'_> {
 
 /// Text preceding a marker is test output that arrived without its own newline;
 /// printing it keeps the passthrough contract intact.
-fn passthrough(leading: &str) {
+pub(crate) fn passthrough(leading: &str) {
     if !leading.is_empty() {
         println!("{leading}");
     }
