@@ -134,7 +134,8 @@ neither knows nor cares where a test ran.
 | `native` | An embedded Luau VM inside the CLI | Pure logic. The default, and the fast one | ✅ | ✅ |
 | `lune` | A spawned `lune run` process | Scripts using `@lune/*` | — | ✅ |
 | `lute` | A spawned `lute run` process | Scripts using `@lute/*`, code transforms, tooling | — | ✅ |
-| `cloud` | A real Roblox place via Open Cloud | Instances, services, the DataModel | — | — |
+| `cloud` | A real Roblox place via Open Cloud | Instances, services, the DataModel — in CI | — | — |
+| `studio` | A launched Roblox Studio | The same engine code, locally, zero clicks | — | — |
 
 ```toml
 backend = "native"
@@ -158,7 +159,7 @@ More: **[Backends](docs/backends.md)**.
 | [Writing tests](docs/writing-tests.md) | `describe`, `it`, lifecycle hooks, skipping |
 | [Matchers](docs/matchers.md) | Every matcher, with semantics and failure output |
 | [Backends](docs/backends.md) | Native, Lune, Lute, and Open Cloud |
-| [Studio](docs/studio.md) | The Studio companion plugin (backend in development) |
+| [Studio](docs/studio.md) | Engine suites in a launched Roblox Studio |
 | [Configuration](docs/configuration.md) | Every `lest.toml` key |
 | [CLI reference](docs/cli.md) | Every command and flag, including watch mode |
 | [Snapshots](docs/snapshots.md) | `toMatchSnapshot`, updating, obsolete keys |

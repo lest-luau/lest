@@ -212,8 +212,8 @@ difference. See [Snapshots](snapshots.md#across-backends).
 
 ## studio
 
-Engine suites in a **live Roblox Studio session** — the local, interactive
-complement to cloud, aimed at the save-test-fix loop rather than CI.
+Engine suites via a **launched Roblox Studio** — the local, zero-click
+complement to cloud, using Studio's official command-line interface.
 
 ```toml
 [suites.engine]
@@ -223,17 +223,17 @@ default = false
 ```
 
 ```console
-$ lest run engine --backend studio     # the same suite, in your open Studio
+$ lest run engine --backend studio     # the same suite, in a launched Studio
 ```
 
-One-time setup is `lest studio install` plus two Studio permission prompts;
-the flow, the press-Run step, and every limit are documented in
-**[Studio](studio.md)**. What carries over from cloud: the same bundling, the
-same `[settings] rojo` delegation to the open place, the same CLI-side
-snapshots. What differs: the run executes in *your* Studio session (press Run
-when the CLI says the suite is armed), results stream live, and nothing
-leaves your machine. The studio backend refuses to run under `$CI`, and watch
-mode does not include it yet.
+No setup beyond a place to run against: lest bundles the suite, launches
+Studio on your `[cloud] place_file` (or published place), and decodes the
+results from Studio's output file when it quits. What carries over from
+cloud: the same bundling, the same `[settings] rojo` delegation, the same
+CLI-side snapshots, the same `[cloud]` place configuration. What differs:
+everything runs locally, and every run pays a Studio boot (~15-45s). The
+studio backend refuses to run under `$CI`, and watch mode does not include
+it. Details and troubleshooting: **[Studio](studio.md)**.
 
 ## Overriding a backend
 

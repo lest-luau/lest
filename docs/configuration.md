@@ -171,7 +171,7 @@ Path to the rojo project file, relative to the project root.
 - **Type:** string
 - **Default:** unset
 
-Consumed by the **cloud** backend. When set, a string require whose target the
+Consumed by the **cloud** and **studio** backends. When set, a string require whose target the
 project file maps to a ModuleScript in the place is **delegated**: instead of
 bundling a private copy of the module, the generated require walks to the live
 instance and hands it to the engine's own `require`. The spec and the place's
@@ -207,17 +207,13 @@ the Lest repository can dogfood its own working copy of the framework.
 
 ## `[studio]`
 
-Settings for the Roblox Studio companion plugin and backend (see
-**[Studio](studio.md)**).
+Settings for the studio backend (see **[Studio](studio.md)**). The place it
+launches comes from the shared `[cloud]` block (`place_file`, or
+`place_id` + `universe_id`).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `port` | integer | `28806` | Loopback port `lest studio install` bakes into the plugin for the CLI bridge. |
-
-The port is consumed at install time, not at run time: after changing it,
-re-run `lest studio install`. An explicit `--port` on the install command
-outranks this key; a re-install with neither keeps the existing install's
-port.
+| `executable` | string | platform install location | Path to the Roblox Studio binary, for non-standard installs. |
 
 ## `[coverage]`
 
