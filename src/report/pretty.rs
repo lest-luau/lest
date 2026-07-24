@@ -103,7 +103,9 @@ impl<W: Write> Pretty<W> {
     /// Informational line outside any suite (e.g. an include glob that
     /// matched nothing).
     pub fn note(&mut self, message: &str) {
-        let line = self.paint(DIM, message);
+        // Notes follow grammar like diagnostics do — capitalized, no
+        // trailing period — just in the dim voice.
+        let line = self.paint(DIM, &super::sentence(message));
         let _ = writeln!(self.out, "{line}");
     }
 

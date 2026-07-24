@@ -92,7 +92,7 @@ hidden files are ignored (except `.luaurc`, which affects resolution), and
 At startup and after every pass, a dim banner marks the loop as alive:
 
 ```console
-watching /path/to/project — save a file to re-run (ctrl+c to quit)
+Watching /path/to/project — save a file to re-run (ctrl+c to quit)
 ```
 
 Saving `lest.toml` reloads the configuration. If the fresh config fails to load
@@ -123,8 +123,8 @@ produced it, tagging each suite's section with the environment it ran in.
 Alongside the report itself, the CLI speaks in exactly two voices on stderr:
 **diagnostics** — a colored bold label followed by a capitalized sentence with
 no trailing period (`Error:` and `Failure:` in bold red, `Warning:` in bold
-yellow, e.g. `Error: This is the error`) — and **notes**, dim lowercase
-fragments. There is no `lest:` prefix anywhere.
+yellow, e.g. `Error: This is the error`) — and **notes**, dim capitalized
+sentences with no trailing period. There is no `lest:` prefix anywhere.
 
 #### `--no-color`
 

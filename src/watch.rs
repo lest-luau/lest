@@ -38,7 +38,7 @@ const IGNORED_DIRS: &[&str] = &[
 /// no prefix, on stderr. `"2"` is the palette's `DIM` code — `report::pretty`
 /// keeps the constant private to the reporters.
 fn print_note(message: &str, color: bool) {
-    eprintln!("{}", paint(color, "2", message));
+    eprintln!("{}", paint(color, "2", &crate::report::sentence(message)));
 }
 
 /// The one watching banner, used at startup and after every pass — a single
