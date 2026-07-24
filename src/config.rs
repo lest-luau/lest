@@ -39,6 +39,8 @@ impl fmt::Display for BackendKind {
 /// unmentioned, so [`unknown_keys`] names them back to the reader.
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
+    /// DEPRECATION(0.5): the bare top-level `backend` moved to
+    /// `[settings] backend` in 0.4; honored with a warning until 0.5.
     backend: Option<BackendKind>,
     #[serde(default)]
     suites: IndexMap<String, RawSuite>,
@@ -46,10 +48,30 @@ struct RawConfig {
     settings: RawSettings,
     #[serde(default)]
     coverage: RawCoverage,
+    /// DEPRECATION(0.5): `[cloud]` moved to `[place]` in 0.4 (the table
+    /// held the engine target, not cloud transport); honored with a
+    /// warning until 0.5.
     #[serde(default)]
     cloud: RawCloud,
     #[serde(default)]
+    place: RawPlace,
+    #[serde(default)]
     studio: RawStudio,
+}
+
+/// The `[place]` table: the Roblox place engine suites run in, agnostic of
+/// which backend runs them — cloud uploads/pins `file` and targets the
+/// ids; studio launches `file` (or the published ids); `rojo` maps string
+/// requires into the place for both.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct RawPlace {
+    universe_id: Option<CloudId>,
+    place_id: Option<CloudId>,
+    /// Root-relative path to a built place file (`.rbxl`/`.rbxlx`).
+    file: Option<String>,
+    /// Root-relative rojo project file mapping the filesystem into the
+    /// place, enabling string-require delegation to live instances.
+    rojo: Option<String>,
 }
 
 /// The `[studio]` table: settings for launching Roblox Studio. Only the
@@ -104,19 +126,23 @@ struct RawSuite {
     include: Vec<String>,
     backend: Option<BackendKind>,
     default: Option<bool>,
-    /// Per-suite Open Cloud target, overriding the top-level `[cloud]` block.
+    /// DEPRECATION(0.5): `[suites.X.cloud]` moved to `[suites.X.place]` in
+    /// 0.4; honored with a warning until 0.5.
     #[serde(default)]
     cloud: RawCloud,
+    /// Per-suite place, overriding the top-level `[place]` block.
+    #[serde(default)]
+    place: RawPlace,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawSettings {
+    /// Default backend for suites that don't declare one.
+    backend: Option<BackendKind>,
     timeout_ms: Option<u64>,
     workers: Option<usize>,
-    /// Rojo project file (root-relative) describing how the filesystem maps
-    /// into the place. Consumed by the cloud backend: string requires whose
-    /// targets it maps to place ModuleScripts delegate to the engine's
-    /// `require` instead of bundling a private copy.
+    /// DEPRECATION(0.5): `[settings] rojo` moved to `[place] rojo` in 0.4;
+    /// honored with a warning until 0.5.
     rojo: Option<String>,
     core: Option<String>,
 }
@@ -129,23 +155,27 @@ pub struct Suite {
     /// Suites with `default = false` only run when named explicitly or when
     /// CI is detected.
     pub default_enabled: bool,
-    /// Per-suite Open Cloud overrides; falls back to the top-level `[cloud]`
-    /// block when a field is unset. Consulted by the cloud backend and, for
-    /// its place selection, the studio backend.
-    pub cloud: CloudTarget,
+    /// The place this suite's engine tests run in: per-suite `[suites.X.place]`
+    /// overriding the top-level `[place]`, field by field. Consulted by the
+    /// cloud and studio backends.
+    pub place: PlaceTarget,
 }
 
-/// Open Cloud identifiers resolved for a suite (per-suite overriding
-/// top-level). Either id may still be `None` when nothing supplied it; the
-/// cloud backend turns a missing id into a clear tool error at run time. Never
-/// holds the API key — that is environment-only.
+/// The place resolved for a suite (per-suite overriding top-level). Ids may
+/// still be `None` when nothing supplied them; the engine backends turn a
+/// missing target into a clear tool error at run time. Never holds the API
+/// key — that is environment-only.
 #[derive(Debug, Clone, Default)]
-pub struct CloudTarget {
+pub struct PlaceTarget {
     pub universe_id: Option<String>,
     pub place_id: Option<String>,
-    /// Root-relative path to a place file to upload (hash-skipped) and pin
-    /// tasks to. `None` means run against the place's latest version.
-    pub place_file: Option<String>,
+    /// Root-relative path to a built place file. Cloud uploads it as a new
+    /// saved version (hash-skipped) and pins tasks to it; studio launches
+    /// it. `None` means the published place (cloud: latest version).
+    pub file: Option<String>,
+    /// Root-relative rojo project file for string-require delegation into
+    /// the place.
+    pub rojo: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,9 +189,6 @@ pub struct Config {
     /// materialized into `.lest/core`. Setting it opts out, which is how this
     /// repo dogfoods its own working copy of the framework.
     pub core: Option<String>,
-    /// Root-relative rojo project file (`[settings] rojo`), consumed by the
-    /// cloud backend for place mapping.
-    pub rojo: Option<String>,
     /// Coverage settings (native suites only).
     pub coverage: Coverage,
     /// `[studio] executable` — a path to the Roblox Studio binary, for
@@ -243,15 +270,53 @@ pub fn load(explicit: Option<&Path>, cwd: &Path) -> Result<(Config, PathBuf), To
 /// `[settings] rojo` once was — its unconsumed state belongs here too, so
 /// acceptance never reads as support.)
 fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
-    // `raw` is unused today but stays: warnings about parsed-but-unconsumed
-    // keys read it, and the signature is the seam they return through.
-    let _ = raw;
     let mut warnings = Vec::new();
     let unknown = unknown_keys(text);
     if !unknown.is_empty() {
         warnings.push(unknown_keys_message(&unknown, path));
     }
+    warnings.extend(deprecation_warnings(raw));
     warnings
+}
+
+/// The 0.3 spellings still honored in 0.4, each named with its new home so
+/// a config migrates in one pass. DEPRECATION(0.5): when these fallbacks
+/// are removed, these warnings become the only guidance — keep them until
+/// the same release deletes both.
+fn deprecation_warnings(raw: &RawConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut moved = |old: &str, new: &str| {
+        out.push(format!(
+            "`{old}` is deprecated and moves to `{new}` in 0.5 — update lest.toml"
+        ));
+    };
+    if raw.backend.is_some() {
+        moved("backend", "[settings] backend");
+    }
+    if raw.cloud.universe_id.is_some() {
+        moved("[cloud] universe_id", "[place] universe_id");
+    }
+    if raw.cloud.place_id.is_some() {
+        moved("[cloud] place_id", "[place] place_id");
+    }
+    if raw.cloud.place_file.is_some() {
+        moved("[cloud] place_file", "[place] file");
+    }
+    if raw.settings.rojo.is_some() {
+        moved("[settings] rojo", "[place] rojo");
+    }
+    for (name, suite) in &raw.suites {
+        if suite.cloud.universe_id.is_some()
+            || suite.cloud.place_id.is_some()
+            || suite.cloud.place_file.is_some()
+        {
+            moved(
+                &format!("[suites.{name}.cloud]"),
+                &format!("[suites.{name}.place]"),
+            );
+        }
+    }
+    out
 }
 
 /// The unknown-key warning body — a lowercase fragment, capitalized by the
@@ -274,12 +339,13 @@ fn unknown_keys_message(unknown: &[String], path: &Path) -> String {
 /// parse below reports those far better than a key list would.
 fn unknown_keys(text: &str) -> Vec<String> {
     const TOP: &[&str] = &[
-        "backend", "suites", "settings", "coverage", "cloud", "studio",
+        "backend", "suites", "settings", "coverage", "cloud", "place", "studio",
     ];
-    const SUITE: &[&str] = &["include", "backend", "default", "cloud"];
-    const SETTINGS: &[&str] = &["timeout_ms", "workers", "rojo", "core"];
+    const SUITE: &[&str] = &["include", "backend", "default", "cloud", "place"];
+    const SETTINGS: &[&str] = &["backend", "timeout_ms", "workers", "rojo", "core"];
     const COVERAGE: &[&str] = &["exclude", "min"];
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
+    const PLACE: &[&str] = &["universe_id", "place_id", "file", "rojo"];
     const STUDIO: &[&str] = &["executable"];
 
     fn collect(prefix: &str, table: &toml::Table, known: &[&str], out: &mut Vec<String>) {
@@ -311,6 +377,9 @@ fn unknown_keys(text: &str) -> Vec<String> {
     if let Some(cloud) = table(root, "cloud") {
         collect("cloud.", cloud, CLOUD, &mut out);
     }
+    if let Some(place) = table(root, "place") {
+        collect("place.", place, PLACE, &mut out);
+    }
     if let Some(studio) = table(root, "studio") {
         collect("studio.", studio, STUDIO, &mut out);
     }
@@ -323,43 +392,79 @@ fn unknown_keys(text: &str) -> Vec<String> {
             if let Some(cloud) = table(suite, "cloud") {
                 collect(&format!("suites.{name}.cloud."), cloud, CLOUD, &mut out);
             }
+            if let Some(place) = table(suite, "place") {
+                collect(&format!("suites.{name}.place."), place, PLACE, &mut out);
+            }
         }
     }
     out
 }
 
 fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
-    let default_backend = raw.backend.unwrap_or(BackendKind::Native);
-    let top_universe = raw.cloud.universe_id.clone().map(CloudId::into_string);
-    let top_place = raw.cloud.place_id.clone().map(CloudId::into_string);
-    let top_place_file = raw.cloud.place_file.clone();
+    // `[settings] backend` is the home; the bare top-level key is the 0.3
+    // spelling, honored underneath it. DEPRECATION(0.5): drop `raw.backend`.
+    let default_backend = raw
+        .settings
+        .backend
+        .or(raw.backend)
+        .unwrap_or(BackendKind::Native);
+    // Top-level place, field by field: `[place]` wins over the deprecated
+    // `[cloud]` spelling (and `[settings] rojo`). DEPRECATION(0.5): drop
+    // the `raw.cloud` / `raw.settings.rojo` fallbacks.
+    let top = PlaceTarget {
+        universe_id: raw
+            .place
+            .universe_id
+            .clone()
+            .or_else(|| raw.cloud.universe_id.clone())
+            .map(CloudId::into_string),
+        place_id: raw
+            .place
+            .place_id
+            .clone()
+            .or_else(|| raw.cloud.place_id.clone())
+            .map(CloudId::into_string),
+        file: raw
+            .place
+            .file
+            .clone()
+            .or_else(|| raw.cloud.place_file.clone()),
+        rojo: raw.place.rojo.clone().or_else(|| raw.settings.rojo.clone()),
+    };
 
     let mut suites: Vec<Suite> = raw
         .suites
         .into_iter()
         .map(|(name, suite)| {
-            // Per-suite value wins; otherwise inherit the top-level `[cloud]`.
-            let universe_id = suite
-                .cloud
-                .universe_id
-                .map(CloudId::into_string)
-                .or_else(|| top_universe.clone());
-            let place_id = suite
-                .cloud
-                .place_id
-                .map(CloudId::into_string)
-                .or_else(|| top_place.clone());
-            let place_file = suite.cloud.place_file.or_else(|| top_place_file.clone());
+            // Per-suite `[suites.X.place]` wins over the deprecated
+            // `[suites.X.cloud]`, then the top-level place, field by field.
+            // DEPRECATION(0.5): drop the `suite.cloud` fallbacks.
+            let place = PlaceTarget {
+                universe_id: suite
+                    .place
+                    .universe_id
+                    .or(suite.cloud.universe_id)
+                    .map(CloudId::into_string)
+                    .or_else(|| top.universe_id.clone()),
+                place_id: suite
+                    .place
+                    .place_id
+                    .or(suite.cloud.place_id)
+                    .map(CloudId::into_string)
+                    .or_else(|| top.place_id.clone()),
+                file: suite
+                    .place
+                    .file
+                    .or(suite.cloud.place_file)
+                    .or_else(|| top.file.clone()),
+                rojo: suite.place.rojo.or_else(|| top.rojo.clone()),
+            };
             Suite {
                 name,
                 include: suite.include,
                 backend: suite.backend.unwrap_or(default_backend),
                 default_enabled: suite.default.unwrap_or(true),
-                cloud: CloudTarget {
-                    universe_id,
-                    place_id,
-                    place_file,
-                },
+                place,
             }
         })
         .collect();
@@ -379,11 +484,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
             include: vec!["**/*.spec.luau".to_string()],
             backend: default_backend,
             default_enabled: true,
-            cloud: CloudTarget {
-                universe_id: top_universe,
-                place_id: top_place,
-                place_file: top_place_file,
-            },
+            place: top.clone(),
         });
     }
 
@@ -402,7 +503,6 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         timeout: Duration::from_millis(raw.settings.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
         workers: raw.settings.workers.unwrap_or(0),
         core: raw.settings.core,
-        rojo: raw.settings.rojo,
         coverage,
         studio_executable: raw.studio.executable,
         // Filled in by `load`, which is the only place that knows the path.
@@ -538,23 +638,122 @@ mod tests {
             "#,
         );
         let engine = config.suites.iter().find(|s| s.name == "engine").unwrap();
-        assert_eq!(engine.cloud.place_file.as_deref(), Some("test-place.rbxl"));
+        assert_eq!(engine.place.file.as_deref(), Some("test-place.rbxl"));
         let other = config.suites.iter().find(|s| s.name == "other").unwrap();
-        assert_eq!(other.cloud.place_file.as_deref(), Some("other-place.rbxl"));
+        assert_eq!(other.place.file.as_deref(), Some("other-place.rbxl"));
     }
 
     /// `[settings] rojo` was warned about while it was accepted-but-unconsumed;
     /// now that the cloud backend consumes it, setting it must be silent.
     #[test]
-    fn a_set_rojo_key_is_consumed_and_earns_no_warning() {
+    fn a_deprecated_rojo_key_is_honored_and_warned() {
+        // DEPRECATION(0.5): delete this test with the fallback it covers.
         let text = "[settings]\nrojo = \"default.project.json\"\n";
         let raw: RawConfig = toml::from_str(text).unwrap();
-        assert!(config_warnings(text, &raw, Path::new("lest.toml")).is_empty());
+        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("[settings] rojo"));
+        assert!(warnings[0].contains("[place] rojo"));
         assert_eq!(
-            parse(text).rojo.as_deref(),
+            parse(text).suites[0].place.rojo.as_deref(),
             Some("default.project.json"),
-            "the key must land in the resolved config"
+            "the deprecated spelling must still be honored in 0.4"
         );
+    }
+
+    #[test]
+    fn the_new_place_table_earns_no_warnings_and_wins_over_old_spellings() {
+        let text = r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [place]
+            universe_id = 1
+            place_id = 2
+            file = "new-place.rbxl"
+            rojo = "new.project.json"
+        "#;
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        assert!(config_warnings(text, &raw, Path::new("lest.toml")).is_empty());
+        let config = parse(text);
+        let place = &config.suites[0].place;
+        assert_eq!(place.universe_id.as_deref(), Some("1"));
+        assert_eq!(place.place_id.as_deref(), Some("2"));
+        assert_eq!(place.file.as_deref(), Some("new-place.rbxl"));
+        assert_eq!(place.rojo.as_deref(), Some("new.project.json"));
+
+        // DEPRECATION(0.5): the second half of this test dies with the
+        // fallbacks. Old and new present together: new wins, old warns.
+        let both = r#"
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [cloud]
+            place_file = "old-place.rbxl"
+
+            [place]
+            file = "new-place.rbxl"
+        "#;
+        let raw: RawConfig = toml::from_str(both).unwrap();
+        let warnings = config_warnings(both, &raw, Path::new("lest.toml"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("[cloud] place_file"));
+        assert_eq!(
+            parse(both).suites[0].place.file.as_deref(),
+            Some("new-place.rbxl")
+        );
+    }
+
+    #[test]
+    fn deprecated_spellings_each_warn_with_their_new_home() {
+        // DEPRECATION(0.5): delete this test with the fallbacks it covers.
+        let text = r#"
+            backend = "lune"
+
+            [suites.engine]
+            include = ["tests/engine/**"]
+
+            [suites.engine.cloud]
+            universe_id = 1
+
+            [cloud]
+            universe_id = 1
+            place_id = 2
+            place_file = "p.rbxl"
+
+            [settings]
+            rojo = "default.project.json"
+        "#;
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
+        let all = warnings.join("\n");
+        assert!(all.contains("`backend` is deprecated"));
+        assert!(all.contains("[settings] backend"));
+        assert!(all.contains("[place] universe_id"));
+        assert!(all.contains("[place] place_id"));
+        assert!(all.contains("[place] file"));
+        assert!(all.contains("[place] rojo"));
+        assert!(all.contains("[suites.engine.place]"));
+        // Honored: the old spellings still resolve.
+        let config = parse(text);
+        assert_eq!(config.suites[0].backend, BackendKind::Lune);
+        assert_eq!(config.suites[0].place.file.as_deref(), Some("p.rbxl"));
+    }
+
+    #[test]
+    fn settings_backend_is_the_default_and_outranks_the_top_level_spelling() {
+        let config = parse(
+            r#"
+            backend = "lune"
+
+            [suites.unit]
+            include = ["src/**/*.spec.luau"]
+
+            [settings]
+            backend = "lute"
+            "#,
+        );
+        assert_eq!(config.suites[0].backend, BackendKind::Lute);
     }
 
     #[test]
@@ -691,14 +890,14 @@ mod tests {
             "#,
         );
         let engine = config.suites.iter().find(|s| s.name == "engine").unwrap();
-        assert_eq!(engine.cloud.universe_id.as_deref(), Some("10469641725"));
-        assert_eq!(engine.cloud.place_id.as_deref(), Some("102831964562199"));
+        assert_eq!(engine.place.universe_id.as_deref(), Some("10469641725"));
+        assert_eq!(engine.place.place_id.as_deref(), Some("102831964562199"));
 
         // Per-suite `place_id` overrides the top-level; `universe_id` still
         // inherits.
         let other = config.suites.iter().find(|s| s.name == "other").unwrap();
-        assert_eq!(other.cloud.universe_id.as_deref(), Some("10469641725"));
-        assert_eq!(other.cloud.place_id.as_deref(), Some("999"));
+        assert_eq!(other.place.universe_id.as_deref(), Some("10469641725"));
+        assert_eq!(other.place.place_id.as_deref(), Some("999"));
     }
 
     #[test]

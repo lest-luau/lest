@@ -796,7 +796,7 @@ pub fn run_suites_with(
             workers: config.workers,
             name_filter: params.name_filter.map(str::to_string),
             coverage: params.coverage && suite.backend == BackendKind::Native,
-            rojo_project: config.rojo.as_ref().map(|project| root.join(project)),
+            rojo_project: suite.place.rojo.as_ref().map(|project| root.join(project)),
             studio_executable: config.studio_executable.as_ref().map(|exe| root.join(exe)),
         };
 
@@ -919,8 +919,8 @@ pub fn run_suites_with(
                 BackendKind::Lute => {
                     backend::runtime::run(crate::resolve::Runtime::Lute, &plan, &mut sink)
                 }
-                BackendKind::Cloud => backend::cloud::run(&plan, &suite.cloud, &mut sink),
-                BackendKind::Studio => backend::studio::run(&plan, &suite.cloud, &mut sink),
+                BackendKind::Cloud => backend::cloud::run(&plan, &suite.place, &mut sink),
+                BackendKind::Studio => backend::studio::run(&plan, &suite.place, &mut sink),
             }
         };
 

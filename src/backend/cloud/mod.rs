@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::backend::{display_rel, EventSink, SuitePlan};
-use crate::config::CloudTarget;
+use crate::config::PlaceTarget;
 use crate::error::ToolError;
 
 use api::{Session, Transport, UreqTransport};
@@ -42,12 +42,12 @@ const API_KEY_VARS: [&str; 2] = ["ROBLOX_API_KEY", "LEST_API_KEY"];
 /// Open Cloud task, streaming decoded events into `on_event`.
 pub fn run(
     plan: &SuitePlan,
-    target: &CloudTarget,
+    target: &PlaceTarget,
     on_event: &mut EventSink,
 ) -> Result<(), ToolError> {
     let api_key = api_key()?;
     let (universe_id, place_id) = resolve_target(plan, target)?;
-    let place_file = target.place_file.as_ref().map(|file| plan.root.join(file));
+    let place_file = target.file.as_ref().map(|file| plan.root.join(file));
     let transport = UreqTransport::new();
     run_with_transport(
         plan,
@@ -393,7 +393,7 @@ fn api_key() -> Result<String, ToolError> {
 
 /// Resolves the universe/place ids for a cloud suite, or a clear tool error
 /// naming exactly what is missing.
-fn resolve_target(plan: &SuitePlan, target: &CloudTarget) -> Result<(String, String), ToolError> {
+fn resolve_target(plan: &SuitePlan, target: &PlaceTarget) -> Result<(String, String), ToolError> {
     let missing = |field: &str| {
         ToolError(format!(
             "cloud suite \"{}\" is missing `{field}` — add it under [cloud] in lest.toml (or on \
@@ -523,7 +523,7 @@ mod tests {
     fn missing_target_is_a_clear_error() {
         let root = repo_root();
         let plan = plan_for(&root, root.join("tests/core/expect.spec.luau"));
-        let err = resolve_target(&plan, &CloudTarget::default()).unwrap_err();
+        let err = resolve_target(&plan, &PlaceTarget::default()).unwrap_err();
         assert!(err.to_string().contains("universe_id"), "{err}");
     }
 
