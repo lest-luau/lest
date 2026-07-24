@@ -117,6 +117,11 @@ local bridge = Bridge.new({ port = PORT, secret = SECRET, version = VERSION }, {
 	},
 })
 
+-- The one load-time line: this plugin has no toolbar button and no UI, so
+-- without it there is nothing visible to distinguish "loaded and idle" from
+-- "never loaded at all" — the first question every setup problem starts with.
+print(`lest plugin {VERSION} loaded (bridge port {PORT})`)
+
 task.spawn(function ()
 	while true do
 		-- `step` is not expected to throw (its deps are called protected),

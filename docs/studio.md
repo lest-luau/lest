@@ -62,6 +62,14 @@ permission prompts:
 2. **Script Injection** — how a run's bundled specs enter the place: the
    plugin writes them as a temporary Script and removes it after the run.
 
+The plugin has **no toolbar button and no UI**, and local plugins don't
+appear in the Manage Plugins window (that lists Creator Store installs). The
+way to see it loaded: restart Studio after installing (local plugins load at
+startup), open the **Output** window, and look for the
+`lest plugin <version> loaded` line. If it's absent, check that
+`lest.rbxmx` sits in the folder the **Plugins tab → Plugins Folder** button
+opens — that is the folder Studio actually reads.
+
 Until a lest CLI session is running, the plugin does nothing but quietly
 retry its local connection with a growing backoff — an idle Studio costs
 nothing.
