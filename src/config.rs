@@ -45,6 +45,16 @@ struct RawConfig {
     coverage: RawCoverage,
     #[serde(default)]
     cloud: RawCloud,
+    #[serde(default)]
+    studio: RawStudio,
+}
+
+/// The `[studio]` table: local-session settings for the Studio companion
+/// plugin. Only the bridge port today; non-secret by construction (the
+/// session secret lives in the user-level stamp, never in config).
+#[derive(Debug, Default, Deserialize)]
+struct RawStudio {
+    port: Option<u16>,
 }
 
 /// Open Cloud target for cloud-backend suites. `universe_id`/`place_id` are
@@ -151,6 +161,10 @@ pub struct Config {
     pub rojo: Option<String>,
     /// Coverage settings (native suites only).
     pub coverage: Coverage,
+    /// `[studio] port` — the bridge port `lest studio install` bakes into the
+    /// companion plugin. `None` means the flag, an existing install, or the
+    /// built-in default decides (in that order).
+    pub studio_port: Option<u16>,
     /// The `lest.toml` this config was read from, or `None` in zero-config
     /// mode. Carried so callers can point at the real file (watch mode watches
     /// it by identity; the empty-discovery message only mentions a config file
@@ -257,11 +271,14 @@ fn unknown_keys_message(unknown: &[String], path: &Path) -> String {
 /// handling that is delicate there. Parse failures return nothing — the real
 /// parse below reports those far better than a key list would.
 fn unknown_keys(text: &str) -> Vec<String> {
-    const TOP: &[&str] = &["backend", "suites", "settings", "coverage", "cloud"];
+    const TOP: &[&str] = &[
+        "backend", "suites", "settings", "coverage", "cloud", "studio",
+    ];
     const SUITE: &[&str] = &["include", "backend", "default", "cloud"];
     const SETTINGS: &[&str] = &["timeout_ms", "workers", "rojo", "core"];
     const COVERAGE: &[&str] = &["exclude", "min"];
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
+    const STUDIO: &[&str] = &["port"];
 
     fn collect(prefix: &str, table: &toml::Table, known: &[&str], out: &mut Vec<String>) {
         for key in table.keys() {
@@ -291,6 +308,9 @@ fn unknown_keys(text: &str) -> Vec<String> {
     }
     if let Some(cloud) = table(root, "cloud") {
         collect("cloud.", cloud, CLOUD, &mut out);
+    }
+    if let Some(studio) = table(root, "studio") {
+        collect("studio.", studio, STUDIO, &mut out);
     }
     if let Some(suites) = table(root, "suites") {
         for (name, suite) in suites {
@@ -382,6 +402,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         core: raw.settings.core,
         rojo: raw.settings.rojo,
         coverage,
+        studio_port: raw.studio.port,
         // Filled in by `load`, which is the only place that knows the path.
         file: None,
     })
@@ -532,6 +553,38 @@ mod tests {
             Some("default.project.json"),
             "the key must land in the resolved config"
         );
+    }
+
+    #[test]
+    fn studio_port_is_parsed_and_defaults_to_none() {
+        let config = parse(
+            r#"
+            [suites.unit]
+            include = ["src/**/*.spec.luau"]
+
+            [studio]
+            port = 41999
+            "#,
+        );
+        assert_eq!(config.studio_port, Some(41999));
+        let config = parse(
+            r#"
+            [suites.unit]
+            include = ["src/**/*.spec.luau"]
+            "#,
+        );
+        assert_eq!(config.studio_port, None);
+    }
+
+    #[test]
+    fn studio_table_keys_are_checked() {
+        let found = unknown_keys(
+            r#"
+            [studio]
+            prot = 41999
+            "#,
+        );
+        assert_eq!(found, vec!["studio.prot".to_string()]);
     }
 
     /// A typo'd key parses fine and does nothing, which is the failure mode

@@ -3,5 +3,8 @@ std = "luau"
 # The engine specs use real Roblox globals (Instance, game, workspace) that only
 # exist in the cloud backend's runtime, not in the `luau` std. They run in a real
 # place, so there is nothing to lint them against here — excluded rather than
-# checked against a Roblox std this project otherwise has no use for.
-exclude = ["tests/engine/**"]
+# checked against a Roblox std this project otherwise has no use for. The Studio
+# plugin's entry script gets the same accommodation for the same reason — and
+# only the entry: everything it decides lives in luau/studio/bridge.luau, which
+# is engine-free on purpose and stays linted (and natively tested).
+exclude = ["tests/engine/**", "luau/studio/main.luau"]

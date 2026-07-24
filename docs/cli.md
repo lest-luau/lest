@@ -197,6 +197,20 @@ On Windows the user `PATH` is edited in the registry with its value kind
 preserved, so `%VAR%`-style (`REG_EXPAND_SZ`) entries keep expanding instead of
 being baked into whatever they expanded to that day.
 
+## `lest studio`
+
+```console
+$ lest studio install    # write the companion plugin into Roblox Studio's Plugins folder
+$ lest studio status     # installed version, port, and plugin-file state
+$ lest studio uninstall  # remove the plugin (only if lest wrote it)
+```
+
+`install` accepts `--port <PORT>` (outranks `[studio] port` in lest.toml) and
+`--force` (replace a plugin file lest does not recognize as its own; without
+it, foreign files are refused). Windows and macOS only — Studio does not run
+elsewhere. See **[Studio](studio.md)** for the permission walkthrough and
+where this is heading; the studio backend itself is in development.
+
 ## Exit codes
 
 | Code | Meaning |

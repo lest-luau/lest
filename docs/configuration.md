@@ -205,6 +205,20 @@ Leave this alone. The framework ships inside the `lest` binary and is written to
 can never be different versions. Setting `core` opts out of that — it exists so
 the Lest repository can dogfood its own working copy of the framework.
 
+## `[studio]`
+
+Settings for the Roblox Studio companion plugin (see **[Studio](studio.md)**;
+the backend itself is in development).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `port` | integer | `28806` | Loopback port `lest studio install` bakes into the plugin for the CLI bridge. |
+
+The port is consumed at install time, not at run time: after changing it,
+re-run `lest studio install`. An explicit `--port` on the install command
+outranks this key; a re-install with neither keeps the existing install's
+port.
+
 ## `[coverage]`
 
 Native suites only. See [Coverage](coverage.md).

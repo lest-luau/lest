@@ -15,6 +15,7 @@ mod report;
 mod resolve;
 mod self_cmd;
 mod snapshot;
+mod studio;
 mod watch;
 
 use std::collections::{HashMap, HashSet};
@@ -67,6 +68,32 @@ enum Command {
     /// Manage the lest installation (PATH; updates later).
     #[command(name = "self")]
     SelfCmd(SelfArgs),
+    /// Manage the Roblox Studio companion plugin.
+    Studio(StudioArgs),
+}
+
+#[derive(Debug, Args)]
+struct StudioArgs {
+    #[command(subcommand)]
+    action: StudioAction,
+}
+
+#[derive(Debug, Subcommand)]
+enum StudioAction {
+    /// Write the companion plugin into the local Roblox Plugins folder.
+    Install {
+        /// Bridge port to bake into the plugin (default: `[studio] port` from
+        /// lest.toml, then an existing install's port, then 28806).
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+        /// Replace a plugin file lest does not recognize as its own.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the companion plugin (only if lest wrote it).
+    Uninstall,
+    /// Report the installed plugin's version, port, and file state.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -348,6 +375,11 @@ fn main() {
             SelfAction::Install => self_cmd::install().map(|()| 0),
             SelfAction::Uninstall => self_cmd::uninstall().map(|()| 0),
         },
+        Some(Command::Studio(args)) => match args.action {
+            StudioAction::Install { port, force } => studio_install(port, force).map(|()| 0),
+            StudioAction::Uninstall => studio::uninstall().map(|()| 0),
+            StudioAction::Status => studio::status().map(|()| 0),
+        },
         Some(Command::Run(args)) => execute_run(args),
         None => execute_run(cli.run_args),
     };
@@ -363,6 +395,17 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// `lest studio install`: merges the port sources the CLI layer owns (flag
+/// over `[studio] port`) before handing off. The config is loaded fully — a
+/// broken lest.toml fails the install loudly rather than silently installing
+/// with a default port the project then cannot reach.
+fn studio_install(port_flag: Option<u16>, force: bool) -> Result<(), ToolError> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| ToolError(format!("cannot determine the working directory: {e}")))?;
+    let (config, _root) = config::load(None, &cwd)?;
+    studio::install(port_flag.or(config.studio_port), force)
 }
 
 /// Parameters for a single `run_suites` invocation, bundled so the function
