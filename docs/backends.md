@@ -210,6 +210,14 @@ Snapshots work on cloud exactly as they do everywhere else — comparison,
 writing, and `-u` updates all happen CLI-side, so the backend makes no
 difference. See [Snapshots](snapshots.md#across-backends).
 
+## studio (in development)
+
+A fifth backend is being built: running engine suites in a **live Roblox
+Studio session** — the local, interactive complement to cloud, aimed at the
+save-test-fix loop rather than CI. Its companion plugin and installer ship
+first; see **[Studio](studio.md)** for what works today and how the pieces
+fit.
+
 ## Overriding a backend
 
 `--backend` forces every selected suite onto one backend for a single run:

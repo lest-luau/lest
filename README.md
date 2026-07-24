@@ -158,6 +158,7 @@ More: **[Backends](docs/backends.md)**.
 | [Writing tests](docs/writing-tests.md) | `describe`, `it`, lifecycle hooks, skipping |
 | [Matchers](docs/matchers.md) | Every matcher, with semantics and failure output |
 | [Backends](docs/backends.md) | Native, Lune, Lute, and Open Cloud |
+| [Studio](docs/studio.md) | The Studio companion plugin (backend in development) |
 | [Configuration](docs/configuration.md) | Every `lest.toml` key |
 | [CLI reference](docs/cli.md) | Every command and flag, including watch mode |
 | [Snapshots](docs/snapshots.md) | `toMatchSnapshot`, updating, obsolete keys |

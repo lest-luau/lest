@@ -22,7 +22,9 @@ fn managed_binary() -> Result<PathBuf, ToolError> {
     Ok(install_dir()?.join(format!("lest{}", std::env::consts::EXE_SUFFIX)))
 }
 
-fn home_dir() -> Result<PathBuf, ToolError> {
+/// `pub(crate)`: `lest studio` keeps its stamp under the same `~/.lest`
+/// directory this module manages, resolved by the same rule.
+pub(crate) fn home_dir() -> Result<PathBuf, ToolError> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
         .filter(|v| !v.is_empty())
