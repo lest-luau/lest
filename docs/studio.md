@@ -24,7 +24,7 @@ the studio backend launches the Studio application and refuses to run under
 
 ## What a run looks like
 
-1. lest bundles the suite (the same bundling and `[settings] rojo`
+1. lest bundles the suite (the same bundling and `[place] rojo`
    delegation the cloud backend uses) and launches Studio on the place.
 2. Studio boots, loads the place, executes the suite, writes its output,
    and quits itself.
@@ -47,19 +47,19 @@ Honest costs, stated plainly:
 The launch needs a place. In order of preference:
 
 ```toml
-[cloud]
-place_file = "test-place.rbxl"   # a built local place file (recommended)
+[place]
+file = "test-place.rbxl"         # a built local place file (recommended)
 ```
 
 or, for a published place:
 
 ```toml
-[cloud]
+[place]
 universe_id = 1234567890
 place_id = 9876543210
 ```
 
-These are the same keys the cloud backend uses — one `[cloud]` block serves
+These are the same keys the cloud backend uses — one `[place]` block serves
 both backends, which is the point: the same engine suite runs via studio
 locally and via cloud in CI.
 

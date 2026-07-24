@@ -96,7 +96,7 @@ include = ["tests/engine/**/*.spec.luau"]
 backend = "cloud"
 default = false          # opt in locally; auto-enabled when $CI is set
 
-[cloud]
+[place]
 universe_id = 1234567890
 place_id = 9876543210
 ```
@@ -107,10 +107,10 @@ place_id = 9876543210
    dedicated test place is the usual arrangement.
 2. **The universe and place ids.** Both appear in the Creator Dashboard URL for
    your experience and place. They aren't secret, so they belong in
-   `lest.toml` — under `[cloud]`, or per-suite as `[suites.<name>.cloud]`.
+   `lest.toml` — under `[place]`, or per-suite as `[suites.<name>.place]`.
 3. **An API key** with the universe-places Luau-execution scope, created at
    [create.roblox.com/dashboard/credentials](https://create.roblox.com/dashboard/credentials).
-   Add the universe-places **write** scope too if you use `place_file` below.
+   Add the universe-places **write** scope too if you use `[place] file` below.
 
 The key **is** secret and is read from the environment only — never from
 `lest.toml`, and never printed:
@@ -142,7 +142,7 @@ bundle.
 
 ### Keeping the place current
 
-lest runs against a place, and with `[cloud] place_file` it also *puts one
+lest runs against a place, and with `[place] file` it also *puts one
 there*: name a built `.rbxl`/`.rbxlx` and every cloud run uploads it as a new
 saved version first — skipped when the file's content hash hasn't changed —
 and pins every task to exactly that version. Build with rojo, point lest at
@@ -150,10 +150,10 @@ the output, and the "someone forgot to publish after a fixture change" run
 against a stale place stops being possible:
 
 ```toml
-[cloud]
+[place]
 universe_id = 1234567890
 place_id = 9876543210
-place_file = "test-place.rbxl"     # e.g. from `rojo build -o test-place.rbxl`
+file = "test-place.rbxl"           # e.g. from `rojo build -o test-place.rbxl`
 ```
 
 ### Requiring place modules
@@ -162,14 +162,14 @@ The bundle is self-contained, so an empty place works — but the place doesn't
 have to be empty. If yours is populated (a rojo-built place with fixtures as
 real ModuleScripts, say), there are two ways a spec reaches those modules.
 
-**With `[settings] rojo` set** (the good way): point lest at your rojo project
+**With `[place] rojo` set** (the good way): point lest at your rojo project
 file, and a plain string require of a mapped module is *delegated* to the
 place. The bundler sees that `../fixtures/recorder` maps to
 `ServerStorage.Fixtures.recorder`, skips bundling it, and the generated
 require resolves the live instance and hands it to the engine's `require`:
 
 ```toml
-[settings]
+[place]
 rojo = "default.project.json"
 ```
 
@@ -193,7 +193,7 @@ Delegated requires — both kinds — go through the engine's native module cach
 so a spec and in-place code requiring the same ModuleScript get the same
 table: shared state and module identity survive, which no bundled copy of the
 module could guarantee. Beware the un-mapped middle ground: a string require
-of a module that also lives in the place, *without* `[settings] rojo`, bundles a
+of a module that also lives in the place, *without* `[place] rojo`, bundles a
 private copy with its own state.
 
 Two rules keep the boundary sharp:
@@ -227,10 +227,10 @@ $ lest run engine --backend studio     # the same suite, in a launched Studio
 ```
 
 No setup beyond a place to run against: lest bundles the suite, launches
-Studio on your `[cloud] place_file` (or published place), and decodes the
+Studio on your `[place] file` (or published place), and decodes the
 results from Studio's output file when it quits. What carries over from
-cloud: the same bundling, the same `[settings] rojo` delegation, the same
-CLI-side snapshots, the same `[cloud]` place configuration. What differs:
+cloud: the same bundling, the same `[place] rojo` delegation, the same
+CLI-side snapshots, the same `[place]` configuration. What differs:
 everything runs locally, and every run pays a Studio boot (~15-45s). The
 studio backend refuses to run under `$CI`, and watch mode does not include
 it. Details and troubleshooting: **[Studio](studio.md)**.

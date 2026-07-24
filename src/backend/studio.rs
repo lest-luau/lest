@@ -30,7 +30,7 @@ use crate::backend::runtime::{
     classify, passthrough, Decoded, DONE_SENTINEL, SENTINEL, SPEC_SENTINEL,
 };
 use crate::backend::{display_rel, EventSink, SuitePlan};
-use crate::config::CloudTarget;
+use crate::config::PlaceTarget;
 use crate::error::ToolError;
 use crate::report::{check_protocol_version, Event, Failure};
 
@@ -44,7 +44,7 @@ const WAIT_POLL: Duration = Duration::from_millis(250);
 
 pub fn run(
     plan: &SuitePlan,
-    target: &CloudTarget,
+    target: &PlaceTarget,
     on_event: &mut EventSink,
 ) -> Result<(), ToolError> {
     if crate::is_ci() {
@@ -67,7 +67,7 @@ pub fn run(
         })
         .collect();
 
-    // `[settings] rojo`, honored exactly as the cloud backend honors it: the
+    // `[place] rojo`, honored exactly as the cloud backend honors it: the
     // launched place is the one mapped requires delegate into.
     let place_map = match &plan.rojo_project {
         Some(project) => Some(
@@ -307,12 +307,12 @@ enum PlaceSource {
 
 /// Resolves the place the launch opens. Studio must be told a place; there
 /// is no "whatever happens to be open" in the launch model.
-fn place_source(target: &CloudTarget, root: &Path) -> Result<PlaceSource, ToolError> {
-    if let Some(file) = &target.place_file {
+fn place_source(target: &PlaceTarget, root: &Path) -> Result<PlaceSource, ToolError> {
+    if let Some(file) = &target.file {
         let path = root.join(file);
         if !path.is_file() {
             return Err(ToolError(format!(
-                "the configured place_file does not exist: {}",
+                "the configured [place] file does not exist: {}",
                 path.display()
             )));
         }
@@ -325,7 +325,7 @@ fn place_source(target: &CloudTarget, root: &Path) -> Result<PlaceSource, ToolEr
         });
     }
     Err(ToolError(
-        "the studio backend needs a place to launch — set `[cloud] place_file` (a built .rbxl) \
+        "the studio backend needs a place to launch — set `[place] file` (a built .rbxl) \
          or `place_id` + `universe_id` in lest.toml"
             .into(),
     ))
@@ -786,20 +786,22 @@ mod tests {
         let file = dir.path().join("place.rbxl");
         std::fs::write(&file, "x").unwrap();
 
-        let with_file = CloudTarget {
+        let with_file = PlaceTarget {
             universe_id: Some("1".into()),
             place_id: Some("2".into()),
-            place_file: Some("place.rbxl".into()),
+            file: Some("place.rbxl".into()),
+            rojo: None,
         };
         assert_eq!(
             place_source(&with_file, dir.path()).expect("file"),
             PlaceSource::File(file)
         );
 
-        let published = CloudTarget {
+        let published = PlaceTarget {
             universe_id: Some("1".into()),
             place_id: Some("2".into()),
-            place_file: None,
+            file: None,
+            rojo: None,
         };
         assert_eq!(
             place_source(&published, dir.path()).expect("published"),
@@ -809,9 +811,9 @@ mod tests {
             }
         );
 
-        let nothing = CloudTarget::default();
+        let nothing = PlaceTarget::default();
         let err = place_source(&nothing, dir.path()).expect_err("must fail");
-        assert!(err.to_string().contains("place_file"));
+        assert!(err.to_string().contains("[place] file"));
     }
 
     #[test]

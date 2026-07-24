@@ -1,5 +1,4 @@
-# lest's own tests, run by lest itself (dogfood).
-backend = "native"
+# Lest's own tests, run by Lest itself (dogfood).
 
 # The framework's pure-logic specs run on the embedded VM.
 [suites.core]
@@ -35,13 +34,15 @@ include = ["tests/engine/**/*.spec.luau"]
 backend = "cloud"
 default = false
 
-# Non-secret Open Cloud target for cloud suites. These identifiers appear in the
-# Creator Dashboard URL for the experience and place.
-[cloud]
+# The Roblox place engine suites run in: the cloud backend targets it via
+# Open Cloud; the studio backend launches it. The identifiers appear in the
+# Creator Dashboard URL and are not secret.
+[place]
 universe_id = 10545683154
 place_id = 82459210338991
 
 [settings]
+backend = "native" # default for suites that don't declare one
 timeout_ms = 5000
 # Where this repo keeps lest/core (dogfood layout; package layouts are
 # auto-detected in a later phase).
