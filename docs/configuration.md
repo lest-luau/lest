@@ -149,7 +149,7 @@ scripts see, with full static types in your editor. Details worth knowing:
 
 - Only targets mapped to a **ModuleScript** delegate; anything else (a
   mapped `Script`, a folder, an unmapped file) bundles exactly as before.
-- lest/core never delegates, even if your project file maps it — the
+- `lest/core` never delegates, even if your project file maps it — the
   framework must be the copy your CLI shipped.
 - If the mapped instance is missing at run time, the test fails with the
   mapped path and a pointer at the likely cause (a stale place) — pair

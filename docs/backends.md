@@ -149,10 +149,10 @@ bundle.
 
 ### Keeping the place current
 
-lest runs against a place, and with `[place] file` it also *puts one
+Lest runs against a place, and with `[place] file` it also *puts one
 there*: name a built `.rbxl`/`.rbxlx` and every cloud run uploads it as a new
 saved version first — skipped when the file's content hash hasn't changed —
-and pins every task to exactly that version. Build with rojo, point lest at
+and pins every task to exactly that version. Build with rojo, point Lest at
 the output, and the "someone forgot to publish after a fixture change" run
 against a stale place stops being possible:
 
@@ -169,7 +169,7 @@ The bundle is self-contained, so an empty place works — but the place doesn't
 have to be empty. If yours is populated (a rojo-built place with fixtures as
 real ModuleScripts, say), there are two ways a spec reaches those modules.
 
-**With `[place] rojo` set** (the good way): point lest at your rojo project
+**With `[place] rojo` set** (the good way): point Lest at your rojo project
 file, and a plain string require of a mapped module is *delegated* to the
 place. The bundler sees that `../fixtures/recorder` maps to
 `ServerStorage.Fixtures.recorder`, skips bundling it, and the generated
@@ -233,7 +233,7 @@ default = false
 $ lest run engine --backend studio     # the same suite, in a launched Studio
 ```
 
-No setup beyond a place to run against: lest bundles the suite, launches
+No setup beyond a place to run against: Lest bundles the suite, launches
 Studio on your `[place] file` (or published place), and decodes the
 results from Studio's output file when it quits. What carries over from
 cloud: the same bundling, the same `[place] rojo` delegation, the same

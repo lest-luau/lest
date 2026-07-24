@@ -1,7 +1,7 @@
 # Studio
 
 The studio backend runs engine suites by **launching Roblox Studio** through
-its official command-line interface: lest bundles your specs, starts Studio
+its official command-line interface: Lest bundles your specs, starts Studio
 on your configured place with `--task RunScript`, waits for the run to
 finish, and decodes the results from Studio's output file. Zero clicks —
 no plugin to install, no permission prompts, nothing to set up beyond a
@@ -24,11 +24,11 @@ the studio backend launches the Studio application and refuses to run under
 
 ## What a run looks like
 
-1. lest bundles the suite (the same bundling and `[place] rojo`
+1. Lest bundles the suite (the same bundling and `[place] rojo`
    delegation the cloud backend uses) and launches Studio on the place.
 2. Studio boots, loads the place, executes the suite, writes its output,
    and quits itself.
-3. lest decodes the output: the same tree, diffs, snapshot behavior, and
+3. Lest decodes the output: the same tree, diffs, snapshot behavior, and
    exit codes as every other backend.
 
 Honest costs, stated plainly:
@@ -115,7 +115,7 @@ locally and via cloud in CI.
 
 ## Finding Studio
 
-lest looks for Studio in the platform's standard install location
+Lest looks for Studio in the platform's standard install location
 (`%LOCALAPPDATA%\Roblox\Versions\...` on Windows, `/Applications` on
 macOS). For non-standard installs:
 
@@ -132,5 +132,5 @@ executable = "D:/Custom/RobloxStudioBeta.exe"
 - **"exited without completing"** — the bundle failed to load; the error
   points at the kept output file, and Studio's own output is usually the
   fastest diagnosis.
-- lest keeps `.lest/studio-run.luau` and `.lest/studio-output.log` after a
+- Lest keeps `.lest/studio-run.luau` and `.lest/studio-output.log` after a
   failure for inspection, and removes them after a success.
