@@ -58,7 +58,7 @@ key otherwise looks exactly like a working config.
 
 The default backend for suites that don't declare one.
 
-- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"`
+- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
 - **Default:** `"native"`
 
 ## `[suites.<name>]`
@@ -92,7 +92,7 @@ never re-run on save — not running it at all is the consistent reading.
 Where this suite's specs run, overriding the top-level default. See
 [Backends](backends.md).
 
-- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"`
+- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
 - **Default:** the top-level `backend`
 
 ### `default`
@@ -154,8 +154,8 @@ Per-test budget in milliseconds.
 
 How it's enforced depends on the backend: `native` uses the VM's interrupt
 callback per test, the spawned runtimes scale it into a whole-process budget and
-kill the process, and `cloud` turns it into a per-spec deadline inside the
-engine.
+kill the process, and `cloud` and `studio` turn it into a per-spec deadline
+inside the engine.
 
 ### `workers`
 
@@ -207,8 +207,8 @@ the Lest repository can dogfood its own working copy of the framework.
 
 ## `[studio]`
 
-Settings for the Roblox Studio companion plugin (see **[Studio](studio.md)**;
-the backend itself is in development).
+Settings for the Roblox Studio companion plugin and backend (see
+**[Studio](studio.md)**).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |

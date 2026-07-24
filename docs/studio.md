@@ -1,19 +1,45 @@
 # Studio
 
-The **studio backend is under construction**: it will run engine suites in a
-live Roblox Studio session — the same specs the cloud backend runs headless,
-executed in a local playtest with results streaming back to your terminal.
-It lands in stages; what works today is the **companion plugin and its
-installer**, documented here. This page grows as the backend does.
-
-The design in one paragraph: you keep Studio open with your place, like you
-already do while developing. A small companion plugin — installed once,
-described below — polls a loopback bridge that the lest CLI opens during a
-run. When a studio-backend run starts, the CLI hands the plugin your bundled
-specs, the plugin runs them in a playtest, and every event streams back into
-the same reporters every other backend feeds. Nothing is mocked; the tests
+The studio backend runs engine suites in a **live Roblox Studio session** —
+the same specs the cloud backend runs headless, executed in a local playtest
+with results streaming back to your terminal. Nothing is mocked; the tests
 run in the real engine. In CI, engine suites keep using the
-[cloud backend](backends.md#cloud) — studio is for the local loop.
+[cloud backend](backends.md#cloud) — studio is for the local loop, and it
+refuses to run under `$CI` on purpose.
+
+How it fits together: you keep Studio open with your place, like you already
+do while developing. The companion plugin (installed once, below) polls a
+loopback bridge the lest CLI opens during a run. A studio run bundles your
+specs, hands them to the plugin, and the plugin injects them into the place
+as a playtest suite.
+
+## Running a suite
+
+```console
+$ lest run engine --backend studio
+```
+
+The CLI waits for your Studio session, then arms the suite and tells you:
+
+1. **Arm** — the plugin injects the bundled specs and tries to start the
+   playtest itself. Studio's API doesn't currently allow that, so expect
+   step 2.
+2. **Press Run (F8)** — both the terminal and Studio's output window say the
+   suite is armed. Your Run press executes it.
+3. **Results stream live** — the same tree, diffs, and snapshot behavior as
+   every other backend, in your terminal as the playtest runs. When the
+   suite finishes, the plugin tries to stop the playtest and cleans up its
+   injected script (it will ask you to press Stop if the attempt fails).
+
+`[settings] rojo` works exactly as it does for cloud: string requires mapped
+to the open place delegate to the live instances. Snapshots compare and
+store CLI-side, identical across backends. Timeouts follow the cloud rule
+(a per-spec deadline inside the engine), with a generous fixed allowance
+for the Run press on top.
+
+Not yet: watch mode (each re-run would need its own Run press — an
+armed-on-save design comes later), and print passthrough from test code
+(only protocol events relay today).
 
 ## Installing the plugin
 
@@ -33,8 +59,8 @@ permission prompts:
 
 1. **HTTP requests** — the plugin talks to the lest CLI on `127.0.0.1` and
    nowhere else. Allow it under *Plugin Management* when Studio asks.
-2. **Script Injection** — not used yet; when the studio backend's run
-   support lands, this is how a run's test bundle enters the place.
+2. **Script Injection** — how a run's bundled specs enter the place: the
+   plugin writes them as a temporary Script and removes it after the run.
 
 Until a lest CLI session is running, the plugin does nothing but quietly
 retry its local connection with a growing backoff — an idle Studio costs

@@ -210,13 +210,30 @@ Snapshots work on cloud exactly as they do everywhere else — comparison,
 writing, and `-u` updates all happen CLI-side, so the backend makes no
 difference. See [Snapshots](snapshots.md#across-backends).
 
-## studio (in development)
+## studio
 
-A fifth backend is being built: running engine suites in a **live Roblox
-Studio session** — the local, interactive complement to cloud, aimed at the
-save-test-fix loop rather than CI. Its companion plugin and installer ship
-first; see **[Studio](studio.md)** for what works today and how the pieces
-fit.
+Engine suites in a **live Roblox Studio session** — the local, interactive
+complement to cloud, aimed at the save-test-fix loop rather than CI.
+
+```toml
+[suites.engine]
+include = ["tests/engine/**/*.spec.luau"]
+backend = "cloud"           # CI stays on cloud
+default = false
+```
+
+```console
+$ lest run engine --backend studio     # the same suite, in your open Studio
+```
+
+One-time setup is `lest studio install` plus two Studio permission prompts;
+the flow, the press-Run step, and every limit are documented in
+**[Studio](studio.md)**. What carries over from cloud: the same bundling, the
+same `[settings] rojo` delegation to the open place, the same CLI-side
+snapshots. What differs: the run executes in *your* Studio session (press Run
+when the CLI says the suite is armed), results stream live, and nothing
+leaves your machine. The studio backend refuses to run under `$CI`, and watch
+mode does not include it yet.
 
 ## Overriding a backend
 

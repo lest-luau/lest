@@ -489,9 +489,9 @@ pub fn install(requested_port: Option<u16>, force: bool) -> Result<(), ToolError
                 );
                 println!("     to the lest CLI on 127.0.0.1:{port} and nowhere else.");
                 println!(
-                    "  3. When the studio backend lands, allow Script Injection too — that is how a"
+                    "  3. Allow Script Injection too — that is how a run's test bundle enters"
                 );
-                println!("     run's test bundle enters the place.");
+                println!("     the place (removed again after each run).");
             }
         }
     }
