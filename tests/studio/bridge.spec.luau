@@ -135,6 +135,22 @@ describe('backoff', function ()
 		expect(last).toBeLessThanOrEqual(2)
 	end)
 
+	it('absent-server polls shed the memory of a suspect episode', function ()
+		local h = makeHarness()
+		-- Grow the backoff to the suspect ceiling first.
+		for _ = 1, 6 do
+			h.respond({ ok = true, status = 403 })
+			h.bridge.step()
+		end
+		-- Once the port goes quiet, delays clamp back to the absent ceiling
+		-- within two steps: a fresh CLI session is still noticed fast.
+		h.respond(NO_SERVER)
+		h.bridge.step()
+		h.respond(NO_SERVER)
+		local delay = h.bridge.step()
+		expect(delay).toBeLessThanOrEqual(2)
+	end)
+
 	it('refused polls back off past the absent-server ceiling and cap', function ()
 		local h = makeHarness()
 		local previous = 0

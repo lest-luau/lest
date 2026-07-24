@@ -43,13 +43,24 @@ nothing.
 ## Checking and removing
 
 ```console
-$ lest studio status     # installed version, port, and file state
+$ lest studio status     # install state, plus a live-session check
 $ lest studio uninstall  # removes the plugin (only if lest wrote it)
 ```
 
+`status` also probes for a live session: it briefly opens the bridge port
+and waits a few seconds for the plugin to poll. With Studio open (and the
+HTTP permission granted) it reports the place and plugin version:
+
+```console
+$ lest studio status
+Installed at C:\...\Plugins\lest.rbxmx (lest 0.3.0, port 28806).
+Live session: "My Game" (place 12345), plugin 0.3.0.
+```
+
+With two Studio instances open, `status` reports whichever answered first.
+
 `install` and `uninstall` refuse to touch a `lest.rbxmx` they don't
-recognize as lest's own (`--force` overrides for install). Live-session
-detection — "is Studio connected right now?" — arrives with the bridge.
+recognize as lest's own (`--force` overrides for install).
 
 ## The bridge port
 

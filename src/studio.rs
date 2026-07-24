@@ -16,6 +16,8 @@
 //! is a loopback-only guard against confusion, not cryptography — the threat
 //! is a stale plugin or another local tool on the port, not an attacker.
 
+pub(crate) mod bridge;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,13 @@ pub const DEFAULT_PORT: u16 = 28806;
 /// means one install serves every project and every run (the port lives
 /// *inside* the file, not in its name).
 const PLUGIN_FILE: &str = "lest.rbxmx";
+
+/// How long `status` waits for a live plugin to poll the probe. The plugin's
+/// absent-server backoff ceiling is 2 seconds and absent polls shed any
+/// longer suspect-episode memory (see luau/studio/bridge.luau), so an idle
+/// connected Studio polls within ~2s of the port opening; the margin covers
+/// a poll mid-flight when the probe bound, and one suspect-widened gap.
+const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// What `install` recorded, mirrored so later commands can recognize their own
 /// work. Lives at `~/.lest/studio.json`.
@@ -547,12 +556,70 @@ pub fn status() -> Result<(), ToolError> {
         }
         (Some(_), PluginState::NeverInstalled) => unreachable!("stamp implies installed"),
     }
-    if stamp.is_some() {
-        // Roadmap context, only meaningful once something is installed to
-        // have a session; the not-installed message already says everything.
-        println!("Live-session detection arrives with the studio bridge.");
+    // With an install on record there is a port and secret to probe, so ask
+    // whether a Studio session is actually connected right now. Probing even
+    // when the file on disk changed or vanished is deliberate: a running
+    // Studio may still have an older, working plugin loaded.
+    if let Some(stamp) = &stamp {
+        // Probe failures print and still exit 0: status is informational,
+        // and "cannot check" is a status.
+        match bridge::probe(stamp.port, &stamp.secret, PROBE_WAIT) {
+            Ok(bridge::PingOutcome::Session(session)) => {
+                if session.ok {
+                    let place = match session.place_id {
+                        Some(id) => format!(" (place {id})"),
+                        None => String::new(),
+                    };
+                    println!(
+                        "Live session: \"{}\"{place}, plugin {}.",
+                        session.place_name, session.plugin_version
+                    );
+                } else {
+                    println!(
+                        "A Studio session answered but refused the check: {}.",
+                        session.error.as_deref().unwrap_or("(no error given)")
+                    );
+                }
+                if let Some(note) = version_note(&session.plugin_version) {
+                    println!("{note}");
+                }
+            }
+            Ok(bridge::PingOutcome::RefusedSecret) => {
+                println!(
+                    "A plugin polled with a mismatched secret: Studio is running an older \
+                     install. Restart Studio to load the refreshed plugin (run `lest studio \
+                     install` first if you haven't)."
+                );
+            }
+            Ok(bridge::PingOutcome::Silent) => {
+                println!("No live Studio session answered on port {}.", stamp.port);
+                // Only suggest the permission checklist when the install
+                // itself is healthy; in the missing/changed states the
+                // install guidance above is the real lead.
+                if state == PluginState::Current {
+                    println!("(Is Studio open, with the plugin's HTTP permission granted?)");
+                }
+            }
+            Err(e) => {
+                println!("Cannot check for a live session: {e}.");
+            }
+        }
     }
     Ok(())
+}
+
+/// The version-handshake note for a live session: a running plugin that does
+/// not match this binary gets explicit re-install and restart instructions,
+/// never a silent skew. `None` when versions agree.
+fn version_note(plugin_version: &str) -> Option<String> {
+    if plugin_version == env!("CARGO_PKG_VERSION") {
+        return None;
+    }
+    Some(format!(
+        "The session's plugin is {plugin_version}; this lest is {}. Run `lest studio install`, \
+         then restart Studio.",
+        env!("CARGO_PKG_VERSION")
+    ))
 }
 
 #[cfg(test)]
@@ -749,6 +816,16 @@ mod tests {
         let err =
             substitute_plugin(template, &[("__X__", "local a = 9".into())]).expect_err("must fail");
         assert!(err.to_string().contains("more than once"));
+    }
+
+    #[test]
+    fn version_note_fires_only_on_skew() {
+        assert_eq!(version_note(env!("CARGO_PKG_VERSION")), None);
+        let note = version_note("0.0.1").expect("a skewed version earns a note");
+        assert!(note.contains("0.0.1"));
+        assert!(note.contains(env!("CARGO_PKG_VERSION")));
+        assert!(note.contains("lest studio install"));
+        assert!(note.contains("restart Studio"));
     }
 
     #[test]

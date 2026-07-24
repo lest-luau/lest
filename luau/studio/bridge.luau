@@ -133,10 +133,13 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 
 	--- An unhealthy poll of either kind: escalate the backoff (never
 	--- logging) and return the delay to wait, clamped to the path's ceiling.
+	--- The stored backoff is clamped too, so absent-server polls shed any
+	--- 8s memory a suspect episode left behind: once the port goes quiet,
+	--- the plugin is back to noticing a fresh CLI session within 2s.
 	local function escalate (ceiling: number): number
 		connected = false
 		local delay = math.min(backoff, ceiling)
-		backoff = math.min(backoff * 2, BACKOFF_MAX_SUSPECT)
+		backoff = math.min(backoff * 2, ceiling)
 		return delay
 	end
 
@@ -219,7 +222,7 @@ function Bridge.new (config: Config, deps: Deps): Bridge
 			warnOnce(
 				'secret',
 				'the lest CLI refused this plugin (mismatched install)'
-					.. ' — run `lest studio install` again to refresh it'
+					.. ' — run `lest studio install`, then restart Studio to load the refreshed plugin'
 			)
 			return escalate(BACKOFF_MAX_SUSPECT)
 		end
