@@ -105,7 +105,9 @@ pub fn run(
     std::fs::create_dir_all(&work_dir)
         .map_err(|e| ToolError(format!("cannot create {}: {e}", work_dir.display())))?;
     let script_path = work_dir.join("studio-run.luau");
-    let output_path = work_dir.join("studio-output.txt");
+    // `.csv` because Studio requires that extension for `--outputFile`
+    // (hand-verified; the official docs' own `out.log` example is rejected).
+    let output_path = work_dir.join("studio-output.csv");
     std::fs::write(&script_path, &built.script)
         .map_err(|e| ToolError(format!("cannot write {}: {e}", script_path.display())))?;
     // A stale output file from an earlier run must never be decoded as this
@@ -180,7 +182,7 @@ pub fn run(
     // The done marker, not the process exit, is the completion authority: a
     // Studio that finished the suite and then wedged on quit must not turn
     // an all-green run red.
-    let lines: Vec<&str> = contents.lines().collect();
+    let lines: Vec<String> = contents.lines().map(unwrap_csv_field).collect();
     let done_seen = lines.iter().any(|line| is_done_framed(line));
     let mut decoder = LineDecoder::new(plan);
     for (index, line) in lines.iter().enumerate() {
@@ -417,6 +419,53 @@ fn newest_studio_exe(versions: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+/// Recovers a marker-carrying message from a CSV row, tolerating the raw
+/// format too.
+///
+/// Studio requires `--outputFile` to be a `.csv`, so a protocol line may
+/// arrive wrapped as a quoted CSV field — where the field is enclosed in
+/// `"` and every interior `"` is doubled, which would corrupt the event
+/// JSON if fed to the decoder as-is. The rule: find the earliest marker;
+/// if the character before it opens a quoted field, un-double quotes and
+/// stop at the field's closing quote (dropping trailing columns);
+/// otherwise return the line from the marker's start unchanged, which also
+/// handles an unquoted or raw-text format byte-for-byte. Lines with no
+/// marker pass through untouched (ordinary output either way).
+fn unwrap_csv_field(line: &str) -> String {
+    let marker_at = [
+        line.find(SENTINEL),
+        line.find(SPEC_SENTINEL),
+        line.find(DONE_SENTINEL),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let Some(marker_at) = marker_at else {
+        return line.to_string();
+    };
+    let quoted = line[..marker_at].ends_with('"');
+    if !quoted {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() - marker_at);
+    let mut chars = line[marker_at..].chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.peek() == Some(&'"') {
+                chars.next();
+                out.push('"');
+            } else {
+                // The field's closing quote: whatever follows is other
+                // CSV columns, not message text.
+                break;
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// The done marker only *frames* a line when no event marker precedes it: a
 /// legitimate event payload (a snapshot's text, a failure message) may
 /// contain the marker characters, and dropping that line would lose a real
@@ -470,7 +519,13 @@ impl<'p> LineDecoder<'p> {
                 passthrough(leading);
                 self.saw_protocol = true;
                 let raw = index.trim();
-                let resolved = raw
+                // CSV wrapping can leave trailing columns after an unquoted
+                // boundary field; the index is the leading digit run.
+                let digits = raw
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("");
+                let resolved = digits
                     .parse::<usize>()
                     .ok()
                     .and_then(|one_based| one_based.checked_sub(1))
@@ -649,6 +704,44 @@ mod tests {
         let mut decoder = LineDecoder::new(&plan);
         let err = feed_all(&mut decoder, &["@@LEST@@{not json"]).expect_err("must fail");
         assert!(err.to_string().contains("undecodable protocol line"));
+    }
+
+    #[test]
+    fn csv_unwrap_recovers_quoted_fields_and_passes_raw_through() {
+        // Quoted CSV field: interior quotes doubled, trailing columns cut.
+        assert_eq!(
+            unwrap_csv_field(
+                r#"12:00:01.234,Output,"@@LEST@@{""kind"":""test_pass"",""name"":""a""}",Server"#
+            ),
+            r#"@@LEST@@{"kind":"test_pass","name":"a"}"#
+        );
+        // Unquoted field: returned unchanged (raw format, or CSV without
+        // quoting); the decoder's own tolerance handles trailing columns.
+        assert_eq!(unwrap_csv_field("@@LEST_SPEC@@1"), "@@LEST_SPEC@@1");
+        assert_eq!(
+            unwrap_csv_field("12:00:01,Output,@@LEST_STUDIO_DONE@@"),
+            "12:00:01,Output,@@LEST_STUDIO_DONE@@"
+        );
+        // No marker: ordinary output, untouched.
+        assert_eq!(unwrap_csv_field("plain chatter"), "plain chatter");
+    }
+
+    #[test]
+    fn boundary_indexes_tolerate_trailing_csv_columns() {
+        let plan = plan();
+        let mut decoder = LineDecoder::new(&plan);
+        let seen = feed_all(
+            &mut decoder,
+            &[
+                "@@LEST_SPEC@@2,MessageOutput,12:00:01",
+                r#"@@LEST@@{"kind":"test_pass","path":[],"name":"b","durationMs":1}"#,
+            ],
+        )
+        .expect("feed");
+        assert_eq!(
+            seen,
+            vec![(Some(PathBuf::from("b.spec.luau")), "test_pass")]
+        );
     }
 
     #[test]
