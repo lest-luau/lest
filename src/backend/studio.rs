@@ -121,7 +121,7 @@ pub fn run(
     let overall = BOOT_ALLOWANCE.saturating_add(budget.saturating_mul(spec_count));
 
     crate::report::note_to_stderr(&format!(
-        "launching Roblox Studio (a boot takes a while; budget {}s)…",
+        "launching Roblox Studio (budget {}s)…",
         overall.as_secs()
     ));
 
@@ -156,6 +156,10 @@ pub fn run(
             }
         }
     };
+
+    // The launch note described a wait that is now over; on a terminal it
+    // clears so the tree opens where the note stood.
+    crate::report::clear_stderr_note();
 
     let status_text = exit_status
         .map(|s| s.to_string())
