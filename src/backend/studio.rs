@@ -577,9 +577,14 @@ impl<'p> LineDecoder<'p> {
                 Ok(())
             }
             Decoded::Output => {
-                // Test prints and Studio's own chatter both land in the
-                // output file; echo them like every backend echoes output.
-                println!("{line}");
+                // The output file opens with Studio's boot chatter and a
+                // dump of the injected script's own source (hand-verified)
+                // before the suite ever runs; the first boundary marker is
+                // where test output becomes possible. Echo only from there,
+                // like every backend echoes test prints.
+                if self.saw_protocol {
+                    println!("{line}");
+                }
                 Ok(())
             }
         }
@@ -706,6 +711,31 @@ mod tests {
         let mut decoder = LineDecoder::new(&plan);
         let err = feed_all(&mut decoder, &["@@LEST@@{not json"]).expect_err("must fail");
         assert!(err.to_string().contains("undecodable protocol line"));
+    }
+
+    #[test]
+    fn pre_protocol_output_is_suppressed_and_post_protocol_output_is_not() {
+        let plan = plan();
+        let mut decoder = LineDecoder::new(&plan);
+        // Before any protocol line: Studio chatter and the script's own
+        // source dump; the decoder must swallow them silently.
+        let seen = feed_all(
+            &mut decoder,
+            &[
+                "Loading place ...",
+                "local function __lest_emit (event)",
+                "@@LEST_SPEC@@1",
+                "a real print from a test",
+            ],
+        )
+        .expect("feed");
+        // Only decoded events reach the sink; the passthrough goes to
+        // stdout, which this test cannot capture — the assertion that
+        // matters is that no error was raised and no event was invented.
+        assert_eq!(seen, vec![]);
+        let (_, saw, current) = decoder.into_parts();
+        assert!(saw);
+        assert_eq!(current, Some(0));
     }
 
     #[test]
