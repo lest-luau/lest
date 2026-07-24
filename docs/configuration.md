@@ -17,8 +17,6 @@ include = ["src/**/*.spec.luau"]
 ## A full example
 
 ```toml
-backend = "native"          # default for suites that don't say otherwise
-
 [suites.unit]
 include = ["src/**/*.spec.luau"]
 
@@ -31,11 +29,14 @@ include = ["tests/engine/**/*.spec.luau"]
 backend = "cloud"
 default = false             # opt in locally; auto-enabled when $CI is set
 
-[cloud]
+[place]                     # the Roblox place engine suites run in
 universe_id = 1234567890
 place_id = 9876543210
+file = "test-place.rbxl"    # uploaded by cloud, launched by studio
+rojo = "default.project.json"
 
 [settings]
+backend = "native"          # default for suites that don't say otherwise
 timeout_ms = 5000
 workers = 0                 # 0 = one per CPU
 
@@ -52,14 +53,9 @@ parses — but not silently: each one is named in a warning on stderr
 (`Warning: Ignoring unrecognized key in lest.toml: bakcend`), because a typo'd
 key otherwise looks exactly like a working config.
 
-## Top level
-
-### `backend`
-
-The default backend for suites that don't declare one.
-
-- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
-- **Default:** `"native"`
+Every key lives in a table. (A bare top-level `backend` is the 0.3
+spelling of `[settings] backend`; it still works in 0.4 with a warning and
+is removed in 0.5 — see [Migrating from 0.3](#migrating-from-03).)
 
 ## `[suites.<name>]`
 
@@ -107,43 +103,75 @@ Whether the suite runs when you type a bare `lest`.
 or `false`. That combination is what makes a slow cloud suite bearable: it stays
 out of your local loop and still gates every pull request.
 
-### `[suites.<name>.cloud]`
+### `[suites.<name>.place]`
 
-Per-suite Open Cloud ids, overriding the top-level `[cloud]` block. Only
-consulted for `cloud` suites.
+A per-suite place, overriding the top-level `[place]` field by field. For
+projects whose engine suites target different places.
 
 ```toml
-[suites.engine.cloud]
+[suites.engine.place]
 universe_id = 1234567890
 place_id = 9876543210
 ```
 
-## `[cloud]`
+## `[place]`
 
-Open Cloud target for cloud suites. These identifiers appear in the Creator
-Dashboard URL for your experience and place; they are **not** secret.
+The Roblox place engine suites run in — backend-agnostic: the **cloud**
+backend targets it through Open Cloud, and the **studio** backend launches
+it. The identifiers appear in the Creator Dashboard URL for your experience
+and place; they are **not** secret.
 
 | Key | Type | Notes |
 | --- | --- | --- |
 | `universe_id` | integer or string | The experience |
-| `place_id` | integer or string | The place the task runs in |
-| `place_file` | string | A built `.rbxl`/`.rbxlx` to upload before running |
+| `place_id` | integer or string | The place |
+| `file` | string | A built `.rbxl`/`.rbxlx`, root-relative |
+| `rojo` | string | Rojo project file mapping the filesystem into the place |
 
-When `place_file` is set (root-relative), every cloud run makes sure the place
-holds exactly that file: the file is uploaded as a new **saved** version —
-skipped when its content hash matches the last upload, recorded in
+When `file` is set, every **cloud** run makes sure the place holds exactly
+that file: it is uploaded as a new **saved** version — skipped when its
+content hash matches the last upload, recorded in
 `.lest/place-versions.json` — and every task is **pinned** to that version.
 Without it, tasks run against whatever the place currently holds, which is
-fine for an empty place and a foot-gun for a populated one: forget to publish
-after a fixture change and the suite quietly tests last week's place. The
-upload needs the **universe-places write** scope on the API key, alongside the
-Luau-execution scope.
+fine for an empty place and a foot-gun for a populated one: forget to
+publish after a fixture change and the suite quietly tests last week's
+place. The upload needs the **universe-places write** scope on the API key,
+alongside the Luau-execution scope. The **studio** backend launches `file`
+directly (or the published place when only the ids are set).
+
+With `rojo` set, a string require whose target the project file maps to a
+ModuleScript in the place is **delegated**: instead of bundling a private
+copy of the module, the generated require walks to the live instance and
+hands it to the engine's own `require`. The spec and the place's own code
+then share one module through the engine's cache — a plain
+`require('../packages/thing/src')` reaches the same singleton the place's
+scripts see, with full static types in your editor. Details worth knowing:
+
+- Only targets mapped to a **ModuleScript** delegate; anything else (a
+  mapped `Script`, a folder, an unmapped file) bundles exactly as before.
+- lest/core never delegates, even if your project file maps it — the
+  framework must be the copy your CLI shipped.
+- If the mapped instance is missing at run time, the test fails with the
+  mapped path and a pointer at the likely cause (a stale place) — pair
+  `rojo` with `file` and that failure mode disappears.
+- The native/lune/lute backends ignore this key; requires there resolve on
+  disk as always.
 
 The API key is deliberately **not** configurable here. It's read from
-`ROBLOX_API_KEY` or `LEST_API_KEY` in the environment, or from a `.env` file at
-the project root. See [Backends → cloud](backends.md#cloud).
+`ROBLOX_API_KEY` or `LEST_API_KEY` in the environment, or from a `.env`
+file at the project root. See [Backends → cloud](backends.md#cloud).
 
 ## `[settings]`
+
+### `backend`
+
+The default backend for suites that don't declare one.
+
+- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
+- **Default:** `"native"`
+
+Precedence for where a suite runs: the `--backend` CLI flag, then the
+suite's own `backend`, then this key.
 
 ### `timeout_ms`
 
@@ -164,35 +192,6 @@ Native-backend worker threads.
 - **Type:** integer
 - **Default:** `0` — one per CPU
 
-### `rojo`
-
-Path to the rojo project file, relative to the project root.
-
-- **Type:** string
-- **Default:** unset
-
-Consumed by the **cloud** and **studio** backends. When set, a string require whose target the
-project file maps to a ModuleScript in the place is **delegated**: instead of
-bundling a private copy of the module, the generated require walks to the live
-instance and hands it to the engine's own `require`. The spec and the place's
-own code then share one module through the engine's cache — a plain
-`require('../packages/thing/src')` reaches the same singleton the place's
-scripts see, with full static types in your editor and no
-`require(instance) :: typeof(require('path'))` two-step.
-
-Details worth knowing:
-
-- Only targets mapped to a **ModuleScript** delegate; anything else (a mapped
-  `Script`, a folder, an unmapped file) bundles exactly as before.
-- lest/core never delegates, even if your project file maps it — the framework
-  must be the copy your CLI shipped, or a stale place could supply an older
-  one.
-- If the mapped instance is missing at run time, the test fails with the
-  mapped path and a pointer at the likely cause (a stale place) — pair
-  `[settings] rojo` with `[cloud] place_file` and that failure mode disappears.
-- The other backends ignore this key; requires there resolve on disk as
-  always.
-
 ### `core`
 
 Path to a copy of the framework on disk, relative to the project root.
@@ -208,12 +207,28 @@ the Lest repository can dogfood its own working copy of the framework.
 ## `[studio]`
 
 Settings for the studio backend (see **[Studio](studio.md)**). The place it
-launches comes from the shared `[cloud]` block (`place_file`, or
+launches comes from the shared `[place]` block (`file`, or
 `place_id` + `universe_id`).
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `executable` | string | platform install location | Path to the Roblox Studio binary, for non-standard installs. |
+
+## Migrating from 0.3
+
+0.4 renamed the place-related keys; the old spellings still work in 0.4
+(each with a warning naming its new home) and are **removed in 0.5**:
+
+| 0.3 | 0.4 |
+| --- | --- |
+| `backend` (top level) | `[settings] backend` |
+| `[cloud] universe_id` | `[place] universe_id` |
+| `[cloud] place_id` | `[place] place_id` |
+| `[cloud] place_file` | `[place] file` |
+| `[settings] rojo` | `[place] rojo` |
+| `[suites.<name>.cloud]` | `[suites.<name>.place]` |
+
+When both spellings are present, the new one wins.
 
 ## `[coverage]`
 

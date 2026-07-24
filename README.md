@@ -138,8 +138,6 @@ neither knows nor cares where a test ran.
 | `studio` | A launched Roblox Studio | The same engine code, locally, zero clicks | — | — |
 
 ```toml
-backend = "native"
-
 [suites.unit]
 include = ["src/**/*.spec.luau"]
 
@@ -147,6 +145,10 @@ include = ["src/**/*.spec.luau"]
 include = ["tests/engine/**/*.spec.luau"]
 backend = "cloud"
 default = false     # opt in locally; auto-enabled when $CI is set
+
+[place]             # the Roblox place engine suites run in
+universe_id = 1234567890
+place_id = 9876543210
 ```
 
 More: **[Backends](docs/backends.md)**.
