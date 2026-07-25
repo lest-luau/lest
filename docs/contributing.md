@@ -1,6 +1,6 @@
 # Contributing
 
-Issues and pull requests are welcome. Lest is [MIT licensed](../LICENSE), and
+Issues and pull requests are welcome. Lest is [MIT licensed](https://github.com/lest-luau/lest/blob/main/LICENSE), and
 contributions are accepted under that same license.
 
 ## Getting set up
