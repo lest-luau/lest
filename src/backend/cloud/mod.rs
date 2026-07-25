@@ -7,6 +7,9 @@
 //! an Open Cloud Luau-execution task, polls to completion, and decodes the
 //! returned protocol events into the same results bus every other backend
 //! feeds. Nothing beyond lest/core need be installed to run engine tests.
+//! Each task boots a fresh Roblox *game server* and runs the bundle as an
+//! ordinary server script (`IsServer()` true, `IsStudio()` false) — the
+//! context contrast with the studio backend lives in docs/studio.md.
 //!
 //! Attribution: cloud runs **one task per spec file**, so each spec's events
 //! arrive already isolated and the sink can attribute them (and their

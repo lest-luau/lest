@@ -32,7 +32,7 @@ lest --reporter junit > results.xml
 case $? in
   0) echo "green" ;;
   1) echo "tests failed" ;;
-  2) echo "lest itself broke — do not report this as a test failure" >&2 ;;
+  2) echo "Lest itself broke — do not report this as a test failure" >&2 ;;
 esac
 ```
 

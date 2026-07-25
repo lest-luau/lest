@@ -90,6 +90,13 @@ into one self-contained script, submits it as an Open Cloud **Luau execution
 task** against a real place, polls to completion, and decodes the collected
 events back into the same report.
 
+Each task boots a fresh Roblox **game server** for your place and runs the
+bundle as an ordinary server script: `RunService:IsServer()` is true,
+`IsClient()` and `IsStudio()` are false, and server-only services behave as
+they do in production. The studio backend runs the same suite in a different
+context — [Execution context](studio.md#execution-context) has the
+comparison.
+
 ```toml
 [suites.engine]
 include = ["tests/engine/**/*.spec.luau"]
@@ -142,10 +149,10 @@ bundle.
 
 ### Keeping the place current
 
-lest runs against a place, and with `[place] file` it also *puts one
+Lest runs against a place, and with `[place] file` it also *puts one
 there*: name a built `.rbxl`/`.rbxlx` and every cloud run uploads it as a new
 saved version first — skipped when the file's content hash hasn't changed —
-and pins every task to exactly that version. Build with rojo, point lest at
+and pins every task to exactly that version. Build with rojo, point Lest at
 the output, and the "someone forgot to publish after a fixture change" run
 against a stale place stops being possible:
 
@@ -162,7 +169,7 @@ The bundle is self-contained, so an empty place works — but the place doesn't
 have to be empty. If yours is populated (a rojo-built place with fixtures as
 real ModuleScripts, say), there are two ways a spec reaches those modules.
 
-**With `[place] rojo` set** (the good way): point lest at your rojo project
+**With `[place] rojo` set** (the good way): point Lest at your rojo project
 file, and a plain string require of a mapped module is *delegated* to the
 place. The bundler sees that `../fixtures/recorder` maps to
 `ServerStorage.Fixtures.recorder`, skips bundling it, and the generated
@@ -226,14 +233,18 @@ default = false
 $ lest run engine --backend studio     # the same suite, in a launched Studio
 ```
 
-No setup beyond a place to run against: lest bundles the suite, launches
+No setup beyond a place to run against: Lest bundles the suite, launches
 Studio on your `[place] file` (or published place), and decodes the
 results from Studio's output file when it quits. What carries over from
 cloud: the same bundling, the same `[place] rojo` delegation, the same
 CLI-side snapshots, the same `[place]` configuration. What differs:
-everything runs locally, and every run pays a Studio boot (~15-45s). The
-studio backend refuses to run under `$CI`, and watch mode does not include
-it. Details and troubleshooting: **[Studio](studio.md)**.
+everything runs locally, every run pays a Studio boot (~15-45s), and the
+**execution context** — cloud runs specs on a real game server, studio runs
+them in an edit-mode session at the command bar's permission level, which
+matters the moment a spec asks `IsServer()` or touches DataStores
+([Execution context](studio.md#execution-context)). The studio backend
+refuses to run under `$CI`, and watch mode does not include it. Details and
+troubleshooting: **[Studio](studio.md)**.
 
 ## Overriding a backend
 

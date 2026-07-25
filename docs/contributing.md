@@ -73,7 +73,7 @@ $ selene luau tests
 ```
 
 These are the exact invocations CI runs (see `.github/workflows/ci.yml`), so a
-green local pass is a green CI pass. The lest run names its suites explicitly
+green local pass is a green CI pass. The Lest run names its suites explicitly
 rather than running a bare `lest`: the engine suite is `default = false` and
 would auto-enable under `$CI`, firing an Open Cloud run per platform — it stays
 a manual `lest run engine`. `stylua --check` reports rather than rewrites; drop
