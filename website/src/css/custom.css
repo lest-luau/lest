@@ -4,27 +4,27 @@
  * work well for content-centric websites.
  */
 
-/* You can override the default Infima variables here. */
+/* Lest orange (#ff5e00), with the shade ramp Infima expects. */
 :root {
-  --ifm-color-primary: #2e8555;
-  --ifm-color-primary-dark: #29784c;
-  --ifm-color-primary-darker: #277148;
-  --ifm-color-primary-darkest: #205d3b;
-  --ifm-color-primary-light: #33925d;
-  --ifm-color-primary-lighter: #359962;
-  --ifm-color-primary-lightest: #3cad6e;
+  --ifm-color-primary: #ff5e00;
+  --ifm-color-primary-dark: #e65500;
+  --ifm-color-primary-darker: #d95000;
+  --ifm-color-primary-darkest: #b34200;
+  --ifm-color-primary-light: #ff6e1a;
+  --ifm-color-primary-lighter: #ff7626;
+  --ifm-color-primary-lightest: #ff8e4d;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
+/* Dark mode shifts the ramp lighter so the accent stays readable. */
 [data-theme='dark'] {
-  --ifm-color-primary: #25c2a0;
-  --ifm-color-primary-dark: #21af90;
-  --ifm-color-primary-darker: #1fa588;
-  --ifm-color-primary-darkest: #1a8870;
-  --ifm-color-primary-light: #29d5b0;
-  --ifm-color-primary-lighter: #32d8b4;
-  --ifm-color-primary-lightest: #4fddbf;
+  --ifm-color-primary: #ff7626;
+  --ifm-color-primary-dark: #ff660d;
+  --ifm-color-primary-darker: #ff5e00;
+  --ifm-color-primary-darkest: #d95000;
+  --ifm-color-primary-light: #ff8640;
+  --ifm-color-primary-lighter: #ff8e4d;
+  --ifm-color-primary-lightest: #ffa673;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }

@@ -61,6 +61,10 @@ const config: Config = {
     },
     navbar: {
       title: 'Lest',
+      logo: {
+        alt: 'Lest logo',
+        src: 'img/lest-logo.png',
+      },
       items: [
         {
           href: 'https://github.com/lest-luau/lest',
