@@ -4,8 +4,14 @@ name: ci
 # whole matrix (and an Open Cloud round trip) twice per commit. The concurrency
 # group cancels a run when a newer commit lands on the same ref, so pushing
 # twice in quick succession doesn't queue two full matrices.
+#
+# Docs-only pushes are skipped: nothing here reads docs/ or website/, and the
+# docs workflow owns those paths.
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - 'website/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

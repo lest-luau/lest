@@ -1,3 +1,7 @@
+---
+slug: /
+---
+
 # Getting started
 
 ## Install
