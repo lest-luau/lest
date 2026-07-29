@@ -6,19 +6,29 @@ slug: /
 
 ## Install
 
-### With rokit (recommended)
+### With LPM (recommended)
 
-[rokit](https://github.com/rojo-rbx/rokit) is a toolchain manager for the Luau
-ecosystem. It pins Lest's version per project — recorded in `rokit.toml` and
-shared with everyone who clones the repo — and puts it on your `PATH`:
+[LPM](https://luaupm.com) is a package manager for the Luau ecosystem that also
+pins tools. It records Lest's version per project — in `lpm.toml`, shared with
+everyone who clones the repo — and puts it on your `PATH`:
+
+```console
+$ lpm tool add lest
+$ lpm i
+```
+
+### With rokit
+
+[rokit](https://github.com/rojo-rbx/rokit) works the same way, pinning the
+version in `rokit.toml`:
 
 ```console
 $ rokit add lest-luau/lest
 ```
 
-This is the same mechanism Lest uses to pin `lune` and `lute` for its own
-spawned-runtime backends, so a project that already uses rokit gains nothing new
-to install.
+Either way, a teammate cloning the project runs one install command and gets
+the same Lest — and `lune`/`lute` for the spawned-runtime backends pin
+alongside it in the same file.
 
 ### From source
 

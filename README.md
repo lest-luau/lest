@@ -84,8 +84,14 @@ that never conflate a failing test with a broken tool.
 
 ## Getting started
 
-Install with [rokit](https://github.com/rojo-rbx/rokit), which pins the version
-per project and puts `lest` on your `PATH`:
+Install with [LPM](https://luaupm.com), which pins the version per project and puts `lest` on your `PATH`:
+
+```console
+$ lpm tool add lest
+$ lpm i
+```
+
+You can also install with [rokit](https://github.com/rojo-rbx/rokit):
 
 ```console
 $ rokit add lest-luau/lest

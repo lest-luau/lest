@@ -51,11 +51,13 @@ const STDERR_TAIL_LINES: usize = 20;
 fn install_hint(runtime: Runtime) -> &'static str {
     match runtime {
         Runtime::Lune => {
-            "install it with rokit (`rokit add lune-org/lune`) or from \
+            "install it with lpm (`lpm tool add lune-org/lune`, then `lpm i`), \
+             rokit (`rokit add lune-org/lune`), or from \
              https://github.com/lune-org/lune/releases"
         }
         Runtime::Lute => {
-            "install it with rokit (`rokit add luau-lang/lute`) or from \
+            "install it with lpm (`lpm tool add luau-lang/lute`, then `lpm i`), \
+             rokit (`rokit add luau-lang/lute`), or from \
              https://github.com/luau-lang/lute/releases"
         }
     }

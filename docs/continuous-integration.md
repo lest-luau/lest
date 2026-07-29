@@ -120,10 +120,22 @@ simple answer for now.
 
 ## A GitHub Actions workflow
 
-Add `lest-luau/lest` to your project's `rokit.toml` (`rokit add lest-luau/lest`)
-and CI needs nothing but [rokit](https://github.com/rojo-rbx/rokit) — no Rust
-toolchain, no build step. `rokit install` brings in Lest alongside whatever
-`lune`/`lute` versions you've pinned.
+Pin Lest in your project with [LPM](https://luaupm.com) (`lpm tool add lest`)
+or [rokit](https://github.com/rojo-rbx/rokit) (`rokit add lest-luau/lest`), and
+CI installs the exact version the project pinned — no Rust toolchain for your
+code, no build step. One caveat while LPM is young: it has no dedicated GitHub
+Action yet, so the rokit pair of steps below is the smoothest CI install today.
+For an LPM-pinned project, replace those two steps with:
+
+```yaml
+      - run: cargo install luaupm
+      - run: lpm i
+```
+
+(`cargo install` compiles LPM on the runner — slower, but stock GitHub runners
+already carry the Rust toolchain. `lpm install` then brings in Lest alongside
+whatever `lune`/`lute` versions you've pinned, exactly as `rokit install` does
+from `rokit.toml`.)
 
 ```yaml
 name: ci

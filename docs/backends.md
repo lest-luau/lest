@@ -72,12 +72,16 @@ The costs are real and worth knowing:
   timeout is a whole-suite budget enforced by killing it.
 - **The runtime must be installed.** Lest checks `PATH` and, if it's missing,
   prints the exact install command rather than a spawn error. Pin the version
-  with [rokit](https://github.com/rojo-rbx/rokit):
+  with [LPM](https://luaupm.com):
 
   ```console
-  $ rokit add lune-org/lune
-  $ rokit add luau-lang/lute
+  $ lpm tool add lune-org/lune
+  $ lpm tool add luau-lang/lute
+  $ lpm i
   ```
+
+  (or with [rokit](https://github.com/rojo-rbx/rokit): `rokit add
+  lune-org/lune`, `rokit add luau-lang/lute`).
 
 Lute's AST and filesystem APIs make a `lute` suite the natural home for testing
 code transforms and tooling scripts.
