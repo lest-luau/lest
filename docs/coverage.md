@@ -35,7 +35,17 @@ gap.
 
 If coverage matters for a module, give it a native suite.
 
-## What's excluded
+## Choosing what's reported
+
+The table only ever lists files the run actually **loaded** — coverage is read
+back off the modules your specs required, not from a walk of the repo. So the
+starting set is already "your code and what it pulls in," not everything on
+disk.
+
+Two keys narrow it further. Globs match against root-relative, forward-slashed
+paths, so one pattern works the same on every platform.
+
+### `exclude`
 
 By default:
 
@@ -54,8 +64,57 @@ exclude = ["**/*.spec.luau", "vendor/**", "src/generated/**"]
 Setting `exclude` **replaces** the defaults rather than adding to them — list
 the spec patterns yourself if you still want them out.
 
-Globs match against root-relative, forward-slashed paths, so one pattern works
-the same on every platform.
+### `include`
+
+When subtracting is the long way round — a library where only `src/` counts —
+name what you want instead:
+
+```toml
+[coverage]
+include = ["src/**"]
+```
+
+Only files matching an `include` glob are reported. Leaving the key out (the
+default) means no narrowing at all.
+
+The two compose, and **`exclude` wins**: `include` picks the candidates,
+`exclude` removes from what's left. That's the pairing to reach for when you
+want a tree minus its generated corner:
+
+```toml
+[coverage]
+include = ["src/**"]
+exclude = ["**/*.spec.luau", "src/generated/**"]
+```
+
+Note that setting `include` doesn't drop the default excludes — `exclude` is
+still defaulted independently, so specs stay out unless you override it.
+
+Lest's own framework is never reported, no matter how wide `include` is.
+
+An `include` of `[]` is rejected rather than guessed at: "cover nothing" and
+"cover everything" are equally fair readings of an empty list. Remove the key
+if you meant no narrowing.
+
+### Glob syntax
+
+`*`, `**`, `?`, `{a,b}` alternation and `[abc]`/`[!abc]` character classes all
+work. Two things to know:
+
+**`*` crosses directory boundaries here.** In `[coverage]`, `src/*` and `src/**`
+mean the same thing: everything under `src/`, at any depth. This differs from a
+suite's `include`, where `*` stops at `/` and `src/*.spec.luau` really does mean
+only the specs directly in `src/`. Write `**` in coverage globs when you mean
+recursive, so the pattern still reads correctly to someone who knows the other
+rule.
+
+**A leading `!` does not negate.** These are globs, not gitignore lines — `!` is
+matched as a literal character, so `"!src/**"` quietly matches nothing rather
+than erroring. Use `include` for what a negated pattern would have expressed.
+
+**Matching is case-sensitive**, even where the file system isn't. On macOS and
+Windows, `include = ["Src/**"]` against a `src/` directory matches nothing and
+reports an empty table.
 
 ## Output formats
 
@@ -104,10 +163,11 @@ A coverage shortfall is a **test failure** (exit 1), not a tool error (exit 2) �
 the run happened and the project didn't meet its own standard. See
 [Continuous integration](continuous-integration.md).
 
-A gate over *nothing* is different: when a minimum is set but no native suite
-was instrumented — say every selected suite runs on `lune` — there is no
-percentage to compare, and exiting 0 would green-light CI while measuring
-nothing. That's a **tool error** (exit 2). The one exception is `--changed`
+A gate over *nothing* is different: when a minimum is set but nothing
+instrumented reached the table — every selected suite runs on `lune`, say, or an
+`include` glob matched no file — there is no percentage to compare, and exiting
+0 would green-light CI while measuring nothing. That's a **tool error**
+(exit 2). The one exception is `--changed`
 selecting no affected specs: the empty run was requested, so it exits 0 and the
 gate is explicitly skipped with a note
 (`coverage minimum not enforced — --changed selected no specs`).

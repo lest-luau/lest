@@ -117,6 +117,7 @@ impl CloudId {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawCoverage {
+    include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     min: Option<f64>,
 }
@@ -201,10 +202,17 @@ pub struct Config {
     pub file: Option<PathBuf>,
 }
 
-/// Line-coverage configuration. `exclude` globs are matched against the
-/// root-relative, forward-slashed spec/source path; `min` gates CI when set.
+/// Line-coverage configuration. `include`/`exclude` globs are matched against
+/// the root-relative, forward-slashed spec/source path; `min` gates CI when set.
 #[derive(Debug, Clone)]
 pub struct Coverage {
+    /// When `Some`, only files matching one of these globs are reported —
+    /// `exclude` still applies on top. `None` (the usual case) means every
+    /// file the run loaded is a candidate. Never `Some` of an empty list: a
+    /// present-but-empty `include` is rejected at load, because reading it as
+    /// "cover nothing" and reading it as "cover everything" are both defensible
+    /// and the config would silently mean one of them.
+    pub include: Option<Vec<String>>,
     pub exclude: Vec<String>,
     pub min: Option<f64>,
 }
@@ -348,7 +356,7 @@ fn unknown_keys(text: &str) -> Vec<String> {
     ];
     const SUITE: &[&str] = &["include", "backend", "default", "cloud", "place"];
     const SETTINGS: &[&str] = &["backend", "timeout_ms", "workers", "rojo", "core"];
-    const COVERAGE: &[&str] = &["exclude", "min"];
+    const COVERAGE: &[&str] = &["include", "exclude", "min"];
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
     const PLACE: &[&str] = &["universe_id", "place_id", "file", "rojo"];
     const STUDIO: &[&str] = &["executable"];
@@ -493,7 +501,15 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         });
     }
 
+    if raw.coverage.include.as_ref().is_some_and(Vec::is_empty) {
+        return Err(ToolError(
+            "`[coverage] include` is an empty list; remove the key to report every covered file"
+                .to_string(),
+        ));
+    }
+
     let coverage = Coverage {
+        include: raw.coverage.include,
         exclude: raw.coverage.exclude.unwrap_or_else(|| {
             DEFAULT_COVERAGE_EXCLUDE
                 .iter()
@@ -611,6 +627,7 @@ mod tests {
             rojo = "default.project.json"
 
             [coverage]
+            include = ["src/**"]
             exclude = ["Packages/**"]
             min = 80
             "#,
@@ -618,7 +635,30 @@ mod tests {
         assert_eq!(config.timeout, Duration::from_millis(1000));
         assert_eq!(config.workers, 4);
         assert_eq!(config.coverage.min, Some(80.0));
+        assert_eq!(
+            config.coverage.include.as_deref(),
+            Some(&["src/**".to_string()][..])
+        );
         assert_eq!(config.coverage.exclude, vec!["Packages/**"]);
+    }
+
+    /// Absent `include` must stay absent rather than defaulting to something
+    /// broad: `None` is what tells the coverage filter not to narrow at all.
+    #[test]
+    fn include_is_unset_by_default() {
+        let config = parse("[coverage]\nmin = 80\n");
+        assert_eq!(config.coverage.include, None);
+        assert_eq!(config.coverage.exclude, DEFAULT_COVERAGE_EXCLUDE);
+    }
+
+    /// `include = []` reads as "cover nothing" and as "cover everything"
+    /// equally well; rejecting it keeps a config from silently meaning the
+    /// opposite of what it says. `exclude = []` stays legal — an empty
+    /// exclusion list has one obvious reading.
+    #[test]
+    fn empty_coverage_include_is_rejected() {
+        let err = resolve_raw(toml::from_str("[coverage]\ninclude = []\n").unwrap()).unwrap_err();
+        assert!(err.0.contains("`[coverage] include`"), "{}", err.0);
     }
 
     /// DEPRECATION(0.5): exercises deprecated spellings; rewrite or delete
@@ -953,6 +993,7 @@ mod tests {
             core = "luau/core"
 
             [coverage]
+            include = ["src/**"]
             exclude = []
             min = 0
             "#

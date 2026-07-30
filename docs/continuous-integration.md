@@ -20,7 +20,7 @@ fails to load, an assertion that fails, a `--min` coverage shortfall — those a
 
 A backend that can't start, a config that won't parse, a protocol line that
 won't decode, a suite that produces no outcomes at all, a coverage minimum with
-no native suite instrumented — those are **tool errors** (2). The run didn't
+nothing in the coverage table — those are **tool errors** (2). The run didn't
 happen (or measured nothing), and calling that a test failure would be a lie
 your dashboard then repeats.
 

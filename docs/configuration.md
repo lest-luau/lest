@@ -218,6 +218,19 @@ launches comes from the shared `[place]` block (`file`, or
 
 Native suites only. See [Coverage](coverage.md).
 
+### `include`
+
+Globs limiting coverage reporting to the files you consider yours, matched
+against root-relative, forward-slashed paths.
+
+- **Type:** array of strings
+- **Default:** unset — no narrowing, leaving `exclude` to decide alone
+
+`exclude` applies on top, so a file matching both is excluded, and `exclude`
+keeps its own defaults whether or not `include` is set. An empty list is a
+config error (exit 2): remove the key to report everything. Lest's own framework
+is never reported regardless.
+
 ### `exclude`
 
 Globs excluded from coverage reporting, matched against root-relative,
@@ -227,7 +240,13 @@ forward-slashed paths.
 - **Default:** `["**/*.spec.luau", "**/*.spec.lua", "Packages/**"]`
 
 Setting this **replaces** the defaults rather than adding to them, so include
-the spec-file patterns yourself if you still want them excluded.
+the spec-file patterns yourself if you still want them excluded. Setting
+`include` does not change this default.
+
+Both keys are matched case-sensitively, and neither supports gitignore-style
+negation: a leading `!` is a literal character, not an operator. Note also that
+`*` crosses `/` in these globs, unlike in a suite's `include`. See
+[Coverage](coverage.md#glob-syntax).
 
 ### `min`
 
@@ -238,9 +257,9 @@ Fail the run (exit code 1) when overall coverage falls below this percentage.
 
 Setting it turns coverage measurement on for every run, just as `--min` implies
 `--coverage` — a gate can't compare against a percentage that was never
-measured. `--min` overrides it for a single run. If the gate is set but no
-native suite was instrumented, that's a tool error (exit 2) — see
-[Coverage](coverage.md#gating-on-a-minimum).
+measured. `--min` overrides it for a single run. If the gate is set but nothing
+reached the table — no native suite ran, or `include` matched nothing — that's a
+tool error (exit 2) — see [Coverage](coverage.md#gating-on-a-minimum).
 
 ## Precedence
 

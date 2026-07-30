@@ -602,18 +602,16 @@ pub fn report_coverage(
     };
     match coverage.overall_percent() {
         None => {
-            // A gate over nothing is a misconfiguration, not a pass: every
-            // selected suite ran on a non-native backend, so there is no
-            // percentage to compare and exiting 0 would green-light CI while
-            // measuring nothing. (The `--changed`-matched-nothing path never
-            // reaches here — an empty run was requested, and skips the gate
-            // with a note instead.)
+            // A gate over nothing is a misconfiguration, not a pass: nothing
+            // reached the table, so there is no percentage to compare and
+            // exiting 0 would green-light CI while measuring nothing. (The
+            // `--changed`-matched-nothing path never reaches here — an empty
+            // run was requested, and skips the gate with a note instead.)
             eprint!(
                 "{}",
                 render_diagnostic(
                     Severity::Error,
-                    "cannot enforce the coverage minimum — no native suite was instrumented, so \
-                     there is no coverage to compare; select a native suite or drop the minimum",
+                    gate_over_nothing(coverage.any_instrumented()),
                     err_color,
                 )
             );
@@ -622,6 +620,7 @@ pub fn report_coverage(
         Some(pct) if pct + 1e-9 < min => {
             // A missed gate is the project's shortfall, not lest malfunctioning:
             // `Failure:` and exit 1, matching how a failing test is reported.
+            // (`gate_over_nothing` above answers the other empty case.)
             eprint!(
                 "{}",
                 render_diagnostic(
@@ -633,6 +632,22 @@ pub fn report_coverage(
             1
         }
         Some(_) => 0,
+    }
+}
+
+/// Why a coverage minimum had nothing to compare against. Which reason it was
+/// is a question about the run, not about which config keys are set: the
+/// `[coverage]` globs can empty the table with `include` never mentioned (the
+/// default `exclude` alone does it to a project whose specs are self-contained),
+/// so keying off the config would still name the wrong cause.
+fn gate_over_nothing(any_instrumented: bool) -> &'static str {
+    if any_instrumented {
+        "cannot enforce the coverage minimum — every instrumented file was filtered out by the \
+         `[coverage]` globs, so there is no coverage to compare; widen `include`, narrow \
+         `exclude`, or drop the minimum"
+    } else {
+        "cannot enforce the coverage minimum — no native suite was instrumented, so there is no \
+         coverage to compare; select a native suite or drop the minimum"
     }
 }
 
@@ -991,6 +1006,7 @@ pub fn run_suites_with(
         coverage::build(
             root,
             &core_entry,
+            config.coverage.include.as_deref(),
             &config.coverage.exclude,
             &acc,
             &non_native_specs,
@@ -1102,6 +1118,25 @@ pub fn find_core_entry(root: &Path, config: &Config) -> Result<PathBuf, ToolErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate's "nothing to compare" error names a cause, so it has to name
+    /// the right one. Both branches are reachable with `include` unset — the
+    /// default `exclude` empties the table on a project whose specs are
+    /// self-contained — which is why the flag, not the config, decides.
+    #[test]
+    fn gate_over_nothing_names_the_cause_it_can_prove() {
+        let filtered = gate_over_nothing(true);
+        assert!(filtered.contains("filtered out"), "{filtered}");
+        assert!(
+            !filtered.contains("no native suite"),
+            "instrumenting happened; saying otherwise sends the user to their \
+             backend selection: {filtered}"
+        );
+
+        let nothing_ran = gate_over_nothing(false);
+        assert!(nothing_ran.contains("no native suite"), "{nothing_ran}");
+        assert!(!nothing_ran.contains("filtered out"), "{nothing_ran}");
+    }
 
     /// Must match core's `fullName` exactly — snapshot verdicts are matched
     /// back to streamed test outcomes on this string.
