@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::report::{CoverageData, FileCoverage};
 use crate::resolve::dependency_closure_all;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::backend::display_rel;
 use crate::backend::native::CoverageMap;
@@ -129,10 +129,19 @@ impl Filter {
 
 /// `kind` is the config key the patterns came from, so an invalid glob names
 /// the key the user has to go fix.
+///
+/// `literal_separator` matches [`crate::discover`], so `*` means the same thing
+/// in `[coverage]` as it does in a suite's `include`: it stops at a directory
+/// boundary, and `**` is how you say "at any depth". Before 0.5 these globs let
+/// a single `*` cross `/`, which made `src/*` and `src/**` silently identical
+/// and let `exclude = ["vendor/*"]` swallow a whole tree — shrinking the
+/// denominator `--min` gates on without ever saying so.
 fn build_globset(patterns: &[String], kind: &str) -> Result<GlobSet, ToolError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob = Glob::new(pattern)
+        let glob = GlobBuilder::new(pattern)
+            .literal_separator(true)
+            .build()
             .map_err(|e| ToolError(format!("invalid coverage {kind} glob \"{pattern}\": {e}")))?;
         builder.add(glob);
     }
@@ -286,6 +295,68 @@ mod tests {
         let data = build(root, core, None, &[], &instrumented, &[]).unwrap();
         let paths: Vec<&str> = data.files().iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["src/math.luau", "tests/helpers/fixture.luau"]);
+    }
+
+    /// 0.5: `*` stops at `/` in coverage globs, as it always has in a suite's
+    /// `include`. Before this, `src/*` and `src/**` compiled to the same regex,
+    /// so "only the top level" was not expressible and `exclude = ["vendor/*"]`
+    /// quietly took the whole tree.
+    #[test]
+    fn star_stops_at_a_directory_boundary() {
+        let root = Path::new("/proj");
+        let core = Path::new("/proj/luau/core/init.luau");
+        let instrumented = map(&[
+            ("/proj/src/top.luau", &[(1, 1)]),
+            ("/proj/src/deep/nested.luau", &[(1, 1)]),
+        ]);
+
+        let one_level = build(
+            root,
+            core,
+            Some(&["src/*".to_string()]),
+            &[],
+            &instrumented,
+            &[],
+        )
+        .unwrap();
+        let paths: Vec<&str> = one_level.files().iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/top.luau"]);
+
+        let recursive = build(
+            root,
+            core,
+            Some(&["src/**".to_string()]),
+            &[],
+            &instrumented,
+            &[],
+        )
+        .unwrap();
+        let mut paths: Vec<&str> = recursive.files().iter().map(|f| f.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["src/deep/nested.luau", "src/top.luau"]);
+    }
+
+    /// The shipped defaults have to keep meaning what they meant: `**/*.spec.luau`
+    /// at every depth including the root, `Packages/**` for the whole vendored
+    /// tree. `literal_separator` changes `*`, and getting `**` wrong here would
+    /// vendor every dependency into the table or start reporting specs.
+    #[test]
+    fn default_excludes_survive_the_separator_rule() {
+        let root = Path::new("/proj");
+        let core = Path::new("/proj/luau/core/init.luau");
+        let instrumented = map(&[
+            ("/proj/src/math.luau", &[(1, 1)]),
+            ("/proj/root.spec.luau", &[(1, 1)]),
+            ("/proj/src/deep/thing.spec.luau", &[(1, 1)]),
+            ("/proj/Packages/dep/deep/mod.luau", &[(1, 1)]),
+        ]);
+        let defaults: Vec<String> = crate::config::DEFAULT_COVERAGE_EXCLUDE
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let data = build(root, core, None, &defaults, &instrumented, &[]).unwrap();
+        let paths: Vec<&str> = data.files().iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/math.luau"]);
     }
 
     /// An `include` wide enough to match lest's own framework must not re-admit

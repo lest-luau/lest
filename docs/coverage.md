@@ -101,12 +101,11 @@ if you meant no narrowing.
 `*`, `**`, `?`, `{a,b}` alternation and `[abc]`/`[!abc]` character classes all
 work. Two things to know:
 
-**`*` crosses directory boundaries here.** In `[coverage]`, `src/*` and `src/**`
-mean the same thing: everything under `src/`, at any depth. This differs from a
-suite's `include`, where `*` stops at `/` and `src/*.spec.luau` really does mean
-only the specs directly in `src/`. Write `**` in coverage globs when you mean
-recursive, so the pattern still reads correctly to someone who knows the other
-rule.
+**`*` stops at a directory boundary; `**` is how you say "at any depth."**
+`src/*` is the files directly in `src/`, `src/**` is the whole tree. This is the
+same rule a suite's `include` follows, so a pattern means one thing wherever you
+write it. (It changed in 0.5 — see
+[Migrating from 0.4](configuration.md#migrating-from-04).)
 
 **A leading `!` does not negate.** These are globs, not gitignore lines — `!` is
 matched as a literal character, so `"!src/**"` quietly matches nothing rather

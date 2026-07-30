@@ -219,8 +219,9 @@ pub struct Coverage {
 
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 /// Files that are never the user's own code under test, excluded from coverage
-/// unless the config overrides `[coverage] exclude`.
-const DEFAULT_COVERAGE_EXCLUDE: &[&str] = &["**/*.spec.luau", "**/*.spec.lua", "Packages/**"];
+/// unless the config overrides `[coverage] exclude`. Visible to the crate so
+/// `coverage`'s tests exercise the real defaults rather than a copy of them.
+pub const DEFAULT_COVERAGE_EXCLUDE: &[&str] = &["**/*.spec.luau", "**/*.spec.lua", "Packages/**"];
 
 /// Loads `lest.toml`. Without an explicit `--config`, a `lest.toml` in the
 /// working directory is used when present; otherwise everything defaults to
@@ -284,7 +285,43 @@ fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
         warnings.push(unknown_keys_message(&unknown, path));
     }
     warnings.extend(deprecation_warnings(raw));
+    warnings.extend(coverage_glob_warnings(raw));
     warnings
+}
+
+/// MIGRATION(0.6): remove once 0.5 configs have turned over.
+///
+/// 0.5 stopped letting a single `*` cross `/` in `[coverage]` globs. That is a
+/// silent change where it matters most: `exclude = ["vendor/*"]` used to remove
+/// a whole tree and now removes one level of it, so files reappear in the table
+/// and a `--min` gate that passed can start failing with nothing in the config
+/// touched. Only a component that is exactly `*` is worth naming — that is the
+/// shape whose meaning flipped and that the author almost certainly meant
+/// recursively. `*.spec.luau` and friends read the same either way.
+fn coverage_glob_warnings(raw: &RawConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut check = |key: &str, patterns: &Option<Vec<String>>| {
+        for pattern in patterns.iter().flatten() {
+            if !pattern.split('/').any(|component| component == "*") {
+                continue;
+            }
+            // The old meaning, spelled the way 0.5 spells it: every bare `*`
+            // component becomes `**`. Suggesting the rewrite is the whole point
+            // of the warning — "your glob changed" without it is just alarm.
+            let recursive: Vec<&str> = pattern
+                .split('/')
+                .map(|component| if component == "*" { "**" } else { component })
+                .collect();
+            out.push(format!(
+                "`[coverage] {key}` pattern \"{pattern}\" matches one directory level; write \
+                 \"{}\" to cover the whole subtree (`*` stopped crossing `/` in 0.5)",
+                recursive.join("/")
+            ));
+        }
+    };
+    check("include", &raw.coverage.include);
+    check("exclude", &raw.coverage.exclude);
+    out
 }
 
 /// The 0.3 spellings still honored in 0.4, each named with its new home so
@@ -649,6 +686,45 @@ mod tests {
         let config = parse("[coverage]\nmin = 80\n");
         assert_eq!(config.coverage.include, None);
         assert_eq!(config.coverage.exclude, DEFAULT_COVERAGE_EXCLUDE);
+    }
+
+    /// The 0.5 separator change is silent where it bites: a `vendor/*` exclude
+    /// stops removing the subtree, files reappear, and a passing `--min` gate
+    /// can start failing with the config untouched. The warning has to name the
+    /// pattern and spell the fix.
+    #[test]
+    fn bare_star_component_earns_a_migration_warning() {
+        let text = "[coverage]\nexclude = [\"vendor/*\", \"src/*/generated.luau\"]\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("\"vendor/*\""), "{}", warnings[0]);
+        assert!(warnings[0].contains("\"vendor/**\""), "{}", warnings[0]);
+        // The rewrite fixes the component that changed, mid-pattern included.
+        assert!(
+            warnings[1].contains("\"src/**/generated.luau\""),
+            "{}",
+            warnings[1]
+        );
+    }
+
+    /// The warning must stay quiet for patterns that read the same under both
+    /// rules, or every correct config gets nagged and the signal is worthless.
+    /// The shipped defaults are the case that matters most.
+    #[test]
+    fn stable_patterns_earn_no_migration_warning() {
+        let text = "[coverage]\ninclude = [\"src/**\"]\nexclude = [\"**/*.spec.luau\", \
+                    \"Packages/**\", \"src/*.gen.luau\"]\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        assert!(
+            config_warnings(text, &raw, Path::new("lest.toml")).is_empty(),
+            "{:?}",
+            config_warnings(text, &raw, Path::new("lest.toml"))
+        );
+
+        // Defaults apply when the key is absent, and must never warn.
+        let bare: RawConfig = toml::from_str("[coverage]\nmin = 80\n").unwrap();
+        assert!(config_warnings("", &bare, Path::new("lest.toml")).is_empty());
     }
 
     /// `include = []` reads as "cover nothing" and as "cover everything"
