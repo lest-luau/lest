@@ -154,10 +154,11 @@ so `> lcov.info` captures a clean tracefile.
 #### `--min <PCT>`
 
 Fail with exit code 1 when overall coverage is below `PCT`. Implies
-`--coverage`, and overrides `[coverage] min` in config. If nothing was
-instrumented — no native suite in the selection — the gate is a tool error
-(exit 2), except when `--changed` selected no specs, which exits 0 and skips
-the gate with a note. See [Coverage](coverage.md#gating-on-a-minimum).
+`--coverage`, and overrides `[coverage] min` in config. If nothing reached the
+coverage table — no native suite in the selection, or `[coverage]` globs that
+matched nothing — the gate is a tool error (exit 2), except when `--changed`
+selected no specs, which exits 0 and skips the gate with a note. See
+[Coverage](coverage.md#gating-on-a-minimum).
 
 ### Config
 

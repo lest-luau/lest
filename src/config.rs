@@ -117,6 +117,7 @@ impl CloudId {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawCoverage {
+    include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     min: Option<f64>,
 }
@@ -201,18 +202,26 @@ pub struct Config {
     pub file: Option<PathBuf>,
 }
 
-/// Line-coverage configuration. `exclude` globs are matched against the
-/// root-relative, forward-slashed spec/source path; `min` gates CI when set.
+/// Line-coverage configuration. `include`/`exclude` globs are matched against
+/// the root-relative, forward-slashed spec/source path; `min` gates CI when set.
 #[derive(Debug, Clone)]
 pub struct Coverage {
+    /// When `Some`, only files matching one of these globs are reported —
+    /// `exclude` still applies on top. `None` (the usual case) means every
+    /// file the run loaded is a candidate. Never `Some` of an empty list: a
+    /// present-but-empty `include` is rejected at load, because reading it as
+    /// "cover nothing" and reading it as "cover everything" are both defensible
+    /// and the config would silently mean one of them.
+    pub include: Option<Vec<String>>,
     pub exclude: Vec<String>,
     pub min: Option<f64>,
 }
 
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
 /// Files that are never the user's own code under test, excluded from coverage
-/// unless the config overrides `[coverage] exclude`.
-const DEFAULT_COVERAGE_EXCLUDE: &[&str] = &["**/*.spec.luau", "**/*.spec.lua", "Packages/**"];
+/// unless the config overrides `[coverage] exclude`. Visible to the crate so
+/// `coverage`'s tests exercise the real defaults rather than a copy of them.
+pub const DEFAULT_COVERAGE_EXCLUDE: &[&str] = &["**/*.spec.luau", "**/*.spec.lua", "Packages/**"];
 
 /// Loads `lest.toml`. Without an explicit `--config`, a `lest.toml` in the
 /// working directory is used when present; otherwise everything defaults to
@@ -276,7 +285,43 @@ fn config_warnings(text: &str, raw: &RawConfig, path: &Path) -> Vec<String> {
         warnings.push(unknown_keys_message(&unknown, path));
     }
     warnings.extend(deprecation_warnings(raw));
+    warnings.extend(coverage_glob_warnings(raw));
     warnings
+}
+
+/// MIGRATION(0.6): remove once 0.5 configs have turned over.
+///
+/// 0.5 stopped letting a single `*` cross `/` in `[coverage]` globs. That is a
+/// silent change where it matters most: `exclude = ["vendor/*"]` used to remove
+/// a whole tree and now removes one level of it, so files reappear in the table
+/// and a `--min` gate that passed can start failing with nothing in the config
+/// touched. Only a component that is exactly `*` is worth naming — that is the
+/// shape whose meaning flipped and that the author almost certainly meant
+/// recursively. `*.spec.luau` and friends read the same either way.
+fn coverage_glob_warnings(raw: &RawConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut check = |key: &str, patterns: &Option<Vec<String>>| {
+        for pattern in patterns.iter().flatten() {
+            if !pattern.split('/').any(|component| component == "*") {
+                continue;
+            }
+            // The old meaning, spelled the way 0.5 spells it: every bare `*`
+            // component becomes `**`. Suggesting the rewrite is the whole point
+            // of the warning — "your glob changed" without it is just alarm.
+            let recursive: Vec<&str> = pattern
+                .split('/')
+                .map(|component| if component == "*" { "**" } else { component })
+                .collect();
+            out.push(format!(
+                "`[coverage] {key}` pattern \"{pattern}\" matches one directory level; write \
+                 \"{}\" to cover the whole subtree (`*` stopped crossing `/` in 0.5)",
+                recursive.join("/")
+            ));
+        }
+    };
+    check("include", &raw.coverage.include);
+    check("exclude", &raw.coverage.exclude);
+    out
 }
 
 /// The 0.3 spellings still honored in 0.4, each named with its new home so
@@ -348,7 +393,7 @@ fn unknown_keys(text: &str) -> Vec<String> {
     ];
     const SUITE: &[&str] = &["include", "backend", "default", "cloud", "place"];
     const SETTINGS: &[&str] = &["backend", "timeout_ms", "workers", "rojo", "core"];
-    const COVERAGE: &[&str] = &["exclude", "min"];
+    const COVERAGE: &[&str] = &["include", "exclude", "min"];
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
     const PLACE: &[&str] = &["universe_id", "place_id", "file", "rojo"];
     const STUDIO: &[&str] = &["executable"];
@@ -493,7 +538,15 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         });
     }
 
+    if raw.coverage.include.as_ref().is_some_and(Vec::is_empty) {
+        return Err(ToolError(
+            "`[coverage] include` is an empty list; remove the key to report every covered file"
+                .to_string(),
+        ));
+    }
+
     let coverage = Coverage {
+        include: raw.coverage.include,
         exclude: raw.coverage.exclude.unwrap_or_else(|| {
             DEFAULT_COVERAGE_EXCLUDE
                 .iter()
@@ -611,6 +664,7 @@ mod tests {
             rojo = "default.project.json"
 
             [coverage]
+            include = ["src/**"]
             exclude = ["Packages/**"]
             min = 80
             "#,
@@ -618,7 +672,69 @@ mod tests {
         assert_eq!(config.timeout, Duration::from_millis(1000));
         assert_eq!(config.workers, 4);
         assert_eq!(config.coverage.min, Some(80.0));
+        assert_eq!(
+            config.coverage.include.as_deref(),
+            Some(&["src/**".to_string()][..])
+        );
         assert_eq!(config.coverage.exclude, vec!["Packages/**"]);
+    }
+
+    /// Absent `include` must stay absent rather than defaulting to something
+    /// broad: `None` is what tells the coverage filter not to narrow at all.
+    #[test]
+    fn include_is_unset_by_default() {
+        let config = parse("[coverage]\nmin = 80\n");
+        assert_eq!(config.coverage.include, None);
+        assert_eq!(config.coverage.exclude, DEFAULT_COVERAGE_EXCLUDE);
+    }
+
+    /// The 0.5 separator change is silent where it bites: a `vendor/*` exclude
+    /// stops removing the subtree, files reappear, and a passing `--min` gate
+    /// can start failing with the config untouched. The warning has to name the
+    /// pattern and spell the fix.
+    #[test]
+    fn bare_star_component_earns_a_migration_warning() {
+        let text = "[coverage]\nexclude = [\"vendor/*\", \"src/*/generated.luau\"]\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        let warnings = config_warnings(text, &raw, Path::new("lest.toml"));
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("\"vendor/*\""), "{}", warnings[0]);
+        assert!(warnings[0].contains("\"vendor/**\""), "{}", warnings[0]);
+        // The rewrite fixes the component that changed, mid-pattern included.
+        assert!(
+            warnings[1].contains("\"src/**/generated.luau\""),
+            "{}",
+            warnings[1]
+        );
+    }
+
+    /// The warning must stay quiet for patterns that read the same under both
+    /// rules, or every correct config gets nagged and the signal is worthless.
+    /// The shipped defaults are the case that matters most.
+    #[test]
+    fn stable_patterns_earn_no_migration_warning() {
+        let text = "[coverage]\ninclude = [\"src/**\"]\nexclude = [\"**/*.spec.luau\", \
+                    \"Packages/**\", \"src/*.gen.luau\"]\n";
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        assert!(
+            config_warnings(text, &raw, Path::new("lest.toml")).is_empty(),
+            "{:?}",
+            config_warnings(text, &raw, Path::new("lest.toml"))
+        );
+
+        // Defaults apply when the key is absent, and must never warn.
+        let bare: RawConfig = toml::from_str("[coverage]\nmin = 80\n").unwrap();
+        assert!(config_warnings("", &bare, Path::new("lest.toml")).is_empty());
+    }
+
+    /// `include = []` reads as "cover nothing" and as "cover everything"
+    /// equally well; rejecting it keeps a config from silently meaning the
+    /// opposite of what it says. `exclude = []` stays legal — an empty
+    /// exclusion list has one obvious reading.
+    #[test]
+    fn empty_coverage_include_is_rejected() {
+        let err = resolve_raw(toml::from_str("[coverage]\ninclude = []\n").unwrap()).unwrap_err();
+        assert!(err.0.contains("`[coverage] include`"), "{}", err.0);
     }
 
     /// DEPRECATION(0.5): exercises deprecated spellings; rewrite or delete
@@ -953,6 +1069,7 @@ mod tests {
             core = "luau/core"
 
             [coverage]
+            include = ["src/**"]
             exclude = []
             min = 0
             "#

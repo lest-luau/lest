@@ -76,6 +76,7 @@ impl FileCoverage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoverageData {
     files: Vec<FileCoverage>,
+    any_instrumented: bool,
 }
 
 impl CoverageData {
@@ -88,6 +89,22 @@ impl CoverageData {
     pub fn add(&mut self, file: FileCoverage) -> &mut Self {
         self.files.push(file);
         self
+    }
+
+    /// Records that the native backend instrumented at least one file, whether
+    /// or not any survived the `[coverage]` globs.
+    pub fn mark_any_instrumented(&mut self) -> &mut Self {
+        self.any_instrumented = true;
+        self
+    }
+
+    /// Whether anything was instrumented *before* filtering. An empty table
+    /// alone cannot say why it is empty: no native suite ran, or the globs
+    /// removed everything. Both callers that explain an empty table to the user
+    /// need to tell those apart, and neither can do it from which config keys
+    /// happen to be set.
+    pub fn any_instrumented(&self) -> bool {
+        self.any_instrumented
     }
 
     /// The recorded files, in insertion order.
@@ -128,8 +145,15 @@ impl CoverageData {
 
         if self.files.is_empty() {
             // A note, so it wears the note voice: dim, lowercase, no period.
-            let note = paint(color, DIM, "  no files were instrumented");
-            let _ = writeln!(out, "{note}");
+            // Which note depends on why the table is empty: a typo'd `include`
+            // glob instruments plenty and reports none, and telling that user
+            // nothing was instrumented sends them to look at their backends.
+            let note = if self.any_instrumented {
+                "  every instrumented file was filtered out by the coverage globs"
+            } else {
+                "  no files were instrumented"
+            };
+            let _ = writeln!(out, "{}", paint(color, DIM, note));
             return out;
         }
 
