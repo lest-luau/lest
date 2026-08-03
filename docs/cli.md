@@ -86,7 +86,7 @@ $ lest run unit --watch
 Watch mode is graph-driven, not glob-driven. Saving a file invalidates its
 content hash; the inverted require graph then yields exactly the specs whose
 transitive requires touched it, and only those re-run. Watching is debounced,
-hidden files are ignored (except `.luaurc`, which affects resolution), and
+hidden files are ignored (except `.luaurc` and `.config.luau`, which affect resolution), and
 `cloud`, `studio`, and `gargantuan` suites are always excluded — the fast loop never waits on a network round-trip or an engine boot.
 
 At startup and after every pass, a dim banner marks the loop as alive:
@@ -111,11 +111,11 @@ $ lest run unit -t 'parser' --watch
 
 #### `--reporter <REPORTER>`
 
-| Reporter | Output |
-| --- | --- |
+| Reporter | Output                                                           |
+| -------- | ---------------------------------------------------------------- |
 | `pretty` | **Default.** Nested suites, inline diffs, slowest tests, summary |
-| `json` | The event log, one JSON object per line |
-| `junit` | JUnit XML, for CI annotations |
+| `json`   | The event log, one JSON object per line                          |
+| `junit`  | JUnit XML, for CI annotations                                    |
 
 All reporters consume the same merged stream regardless of which backend
 produced it, tagging each suite's section with the environment it ran in.
@@ -183,7 +183,9 @@ Re-running is safe: an existing `lest.toml` prompts
 untouched; with `--yes` init refuses and exits 2), and an alias already bound
 to `lest` in `.luaurc` is left alone. `.luaurc` is only rewritten when it
 parses as plain JSON with no comments; otherwise init prints the snippet for
-you to paste. Key order is preserved.
+you to paste. Key order is preserved. A project using `.config.luau` never
+gains a `.luaurc` (the Luau config RFC makes the pair an error) — init prints
+the alias line to paste into it instead.
 
 See [Getting started](getting-started.md#scaffold-a-project).
 
@@ -200,11 +202,11 @@ being baked into whatever they expanded to that day.
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| `0` | Everything passed |
-| `1` | Test failures — including timeouts, spec load errors, and a `--min` shortfall |
-| `2` | Tool error — bad config, a backend that couldn't start, an undecodable event stream, a filter or coverage gate over nothing |
+| Code | Meaning                                                                                                                     |
+| ---- | --------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | Everything passed                                                                                                           |
+| `1`  | Test failures — including timeouts, spec load errors, and a `--min` shortfall                                               |
+| `2`  | Tool error — bad config, a backend that couldn't start, an undecodable event stream, a filter or coverage gate over nothing |
 
 These are never conflated, which is the whole point. A test that times out or a
 spec that fails to load is a *test* failure (1). A backend that can't start, a
@@ -214,11 +216,11 @@ be a lie.
 
 ## Environment variables
 
-| Variable | Effect |
-| --- | --- |
-| `ROBLOX_API_KEY` | Open Cloud API key for `cloud` suites |
-| `LEST_API_KEY` | Alternative name for the same key |
-| `CI` | When set (and not empty, `0`, or `false`), suites with `default = false` run automatically |
-| `NO_COLOR` | When set, disables ANSI color everywhere, same as `--no-color` |
+| Variable         | Effect                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| `ROBLOX_API_KEY` | Open Cloud API key for `cloud` suites                                                      |
+| `LEST_API_KEY`   | Alternative name for the same key                                                          |
+| `CI`             | When set (and not empty, `0`, or `false`), suites with `default = false` run automatically |
+| `NO_COLOR`       | When set, disables ANSI color everywhere, same as `--no-color`                             |
 
 A `.env` file at the project root is loaded automatically.

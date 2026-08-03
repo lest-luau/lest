@@ -73,7 +73,7 @@ pub fn run(
     let mut selected = watchable(select_suites(&config, suite_names, backend_override)?);
     if selected.is_empty() {
         return Err(ToolError(
-            "nothing to watch — every selected suite uses a backend watch cannot re-run (cloud or studio)".to_string(),
+            "nothing to watch — every selected suite uses a backend watch cannot re-run (cloud, studio, or gargantuan)".to_string(),
         ));
     }
 
@@ -208,15 +208,34 @@ pub fn run(
                 "{}",
                 render_warning(
                     "nothing to watch — every selected suite now uses a backend watch cannot \
-                     re-run (cloud or studio); edit lest.toml to select a watchable suite",
+                     re-run (cloud, studio, or gargantuan); edit lest.toml to select a \
+                     watchable suite",
                     err_color,
                 )
             );
             continue;
         }
 
+        // A changed alias config (`.luaurc` / `.config.luau`) redefines what
+        // requires resolve to, and config files are not nodes in the require
+        // graph — it cannot say which specs an alias edit reaches. Re-run
+        // everything rather than silently nothing.
+        let alias_config_changed = changed_set.iter().any(|path| {
+            matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(".luaurc" | ".config.luau")
+            )
+        });
+
         let (pre_discovered, affected) = if config_changed {
             (None, None) // full re-run under the fresh config
+        } else if alias_config_changed {
+            print_note(
+                "an alias config changed — re-running everything, since any require may now \
+                 resolve differently",
+                err_color,
+            );
+            (None, None)
         } else {
             match affected_specs(root, &selected, &changed_set) {
                 Ok((_, affected)) if affected.is_empty() => {
@@ -405,9 +424,10 @@ fn is_interesting(path: &Path, root: &Path, names: &WatchNames) -> bool {
         if IGNORED_DIRS.contains(&name.as_ref()) {
             return false;
         }
-        // Hidden entries are ignored except .luaurc, which affects require
-        // resolution and therefore which tests a change reaches.
-        if name.starts_with('.') && name != ".luaurc" {
+        // Hidden entries are ignored except the alias configs (.luaurc and
+        // .config.luau), which affect require resolution and therefore which
+        // tests a change reaches.
+        if name.starts_with('.') && name != ".luaurc" && name != ".config.luau" {
             return false;
         }
     }
