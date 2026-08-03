@@ -8,15 +8,16 @@
 //! module inlines and nothing delegates), and the process is driven exactly
 //! like lune/lute — sentinel-framed events decoded live off a stdout pipe.
 //!
-//! One thing is unlike either: the engine cannot exit on its own. It has no
-//! `ProcessService:Exit` yet, and headless there is no window whose close
-//! could stop the loop — a run that finished its work steps frames forever.
-//! The done marker is therefore the completion authority, and seeing it is
-//! what makes the CLI kill the process, deliberately. Killing discards the
-//! child's stdio buffer and Luau's `print` never flushes, which is why the
-//! generated head pads stdout after the marker (see the bundler) — without
-//! that, the marker itself could sit in the pipe buffer forever and every
-//! completed run would burn its full budget.
+//! One thing is unlike either: the run's ending is the CLI's to arrange.
+//! The done marker is the completion authority, and what follows it is
+//! two-mode. On engines with `ProcessService`, the head calls
+//! `ExitAsync(0)` right after the marker: the engine exits cleanly, the
+//! exit flushes stdio, and the CLI just reaps the child. On engines that
+//! predate the service, nothing can stop the loop headless — the head pads
+//! stdout in its place (a killed process discards its stdio buffer and
+//! Luau's `print` never flushes, so an unpadded marker could sit in the
+//! pipe buffer forever) and the CLI kills the process after a short grace
+//! wait, deliberately.
 //!
 //! Experimental, stated plainly: the engine is pre-release, unversioned, and
 //! restructuring quickly. The spawn contract this backend leans on
@@ -47,6 +48,14 @@ const BOOT_ALLOWANCE: Duration = Duration::from_secs(30);
 /// (a failed `--script` load among them), so the tail usually names the
 /// cause. A bound, not a log — lines still stream to the terminal live.
 const STDERR_TAIL_LINES: usize = 20;
+
+/// How long after the done marker the CLI waits for the engine to exit on
+/// its own before killing it. An engine whose `ProcessService:ExitAsync`
+/// works exits within milliseconds of the marker; one without the service —
+/// or with the current upstream argument-index bug that makes `ExitAsync`
+/// raise — runs the head's padding fallback instead and spends the full
+/// grace before the kill. The cost of not needing a version probe.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
 
 pub fn run(plan: &SuitePlan, on_event: &mut EventSink) -> Result<(), ToolError> {
     let exe = gargantuan_executable(plan)?;
@@ -194,10 +203,30 @@ pub fn run(plan: &SuitePlan, on_event: &mut EventSink) -> Result<(), ToolError> 
     };
 
     match ending {
-        // The good path: the suite completed. The kill is deliberate — the
-        // engine has no way to exit on its own — and everything after the
-        // marker is padding the decoder never echoed.
+        // The good path: the suite completed. Grace-wait for the engine to
+        // exit itself (the head calls ProcessService:ExitAsync(0) after the
+        // marker on engines that have it) before killing — the wait is what
+        // distinguishes a modern engine from one running the padding
+        // fallback, without a version probe. `finish` runs either way: its
+        // kill is a no-op on an exited child, and the joins are still owed.
+        // The exit status is deliberately ignored here, unlike Eof's: every
+        // verdict already streamed before the marker, so a teardown crash
+        // after it has nothing left to change.
         Ending::Done => {
+            let grace = Instant::now() + EXIT_GRACE;
+            loop {
+                // Keep draining (and discarding) the channel: an engine on
+                // the padding fallback prints ~1 KiB per unthrottled
+                // headless frame, and an undrained channel would buffer
+                // tens of megabytes across the grace.
+                while rx.try_recv().is_ok() {}
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() >= grace => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                    Err(_) => break,
+                }
+            }
             finish(child, rx, (reader, stderr_reader));
         }
         // The budget expired. Which kind of failure that is depends on

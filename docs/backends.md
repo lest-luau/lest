@@ -276,12 +276,17 @@ binary = "vendor/gargantuan/build/gargantuan"
 **Experimental, stated plainly.** The engine is pre-release: it has no
 tagged releases (build it from source and point `[gargantuan] binary` at
 the result — with no `binary` configured, Lest looks for `gargantuan` on
-`PATH`), no way for a script to end the process (Lest kills the engine the
-moment the suite's completion marker arrives — deliberate, not an error),
-and an API surface that is still filling in, so specs will find
+`PATH`), and an API surface that is still filling in, so specs will find
 `not yet implemented` edges. Those are engine facts, not test failures.
 Excluded from watch mode and from `$CI` auto-enable; run it by naming the
 suite explicitly.
+
+How a run ends depends on the engine build: on engines with
+`ProcessService`, Lest's generated entrypoint exits the engine cleanly
+(`ExitAsync(0)`) once the suite completes; on builds that predate the
+service (or whose `ExitAsync` fails), Lest kills the engine a few
+seconds after the suite's completion marker arrives — deliberate, not an
+error.
 
 ## Overriding a backend
 
