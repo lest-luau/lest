@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use crate::backend::cloud::bundle::{self, BundleInput, Head, SpecEntry};
 use crate::backend::runtime::{
-    classify, passthrough, Decoded, DONE_SENTINEL, SENTINEL, SPEC_SENTINEL,
+    classify, is_done_framed, passthrough, Decoded, DONE_SENTINEL, SENTINEL, SPEC_SENTINEL,
 };
 use crate::backend::{display_rel, EventSink, SuitePlan};
 use crate::config::PlaceTarget;
@@ -475,23 +475,6 @@ fn unwrap_csv_field(line: &str) -> String {
     out
 }
 
-/// The done marker only *frames* a line when no event marker precedes it: a
-/// legitimate event payload (a snapshot's text, a failure message) may
-/// contain the marker characters, and dropping that line would lose a real
-/// verdict. The first-marker-wins rule from `classify`, applied here.
-fn is_done_framed(line: &str) -> bool {
-    match line.find(DONE_SENTINEL) {
-        None => false,
-        Some(done_at) => {
-            let framing = [line.find(SENTINEL), line.find(SPEC_SENTINEL)]
-                .into_iter()
-                .flatten()
-                .min();
-            framing.is_none_or(|other_at| done_at < other_at)
-        }
-    }
-}
-
 /// Decodes output-file sentinel lines into protocol events, tracking the
 /// state the run outcome needs afterward. Split from `run` so the decode
 /// rules — boundary mapping, the done-framing skip, protocol validation,
@@ -615,6 +598,7 @@ mod tests {
             coverage: false,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         }
     }
 
