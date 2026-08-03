@@ -577,6 +577,25 @@ fn ensure_luaurc_alias(cwd: &Path) -> Result<bool, ToolError> {
         );
     };
 
+    // A project on `.config.luau` must not gain a sibling `.luaurc`: the Luau
+    // config RFC makes the pair an error, so writing one would break every
+    // conforming tool (lest's own resolver included). The file is real Luau —
+    // not something to rewrite programmatically — so print the line to paste.
+    let config_luau = cwd.join(".config.luau");
+    if config_luau.is_file() {
+        println!(
+            "Left alias config alone — this project uses .config.luau, which lest will not \
+             rewrite (and adding a .luaurc beside it is an error per the Luau config RFC)."
+        );
+        println!(
+            "Add this under `luau.aliases` in {} yourself to require('@lest'):\n  \
+             lest = '{}'",
+            config_luau.display(),
+            embed::CORE_DIR
+        );
+        return Ok(false);
+    }
+
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -732,6 +751,17 @@ mod tests {
 
     fn luaurc(temp: &tempfile::TempDir) -> String {
         std::fs::read_to_string(temp.path().join(".luaurc")).unwrap()
+    }
+
+    #[test]
+    fn a_config_luau_project_never_gains_a_luaurc() {
+        // The Luau config RFC makes `.luaurc` + `.config.luau` in one
+        // directory an error, so init must print-and-decline rather than
+        // create the forbidden pair.
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".config.luau"), "return { luau = {} }\n").unwrap();
+        assert!(!ensure_luaurc_alias(temp.path()).unwrap());
+        assert!(!temp.path().join(".luaurc").exists());
     }
 
     #[test]

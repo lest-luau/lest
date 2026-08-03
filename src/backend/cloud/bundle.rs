@@ -120,8 +120,11 @@ fn brief_reason(error: &ResolveError) -> String {
         }
         ResolveError::UnknownAlias { .. } => "unknown alias".to_string(),
         ResolveError::InvalidSelf { .. } => "@self is only valid from an init module".to_string(),
-        ResolveError::Luaurc { path, .. } => {
-            format!("unreadable .luaurc at {}", path.display())
+        ResolveError::AliasConfig { path, .. } => {
+            // "Unusable", not "unreadable": the variant also covers the
+            // RFC-forbidden state of `.luaurc` and `.config.luau` sharing a
+            // directory, where both files read fine.
+            format!("unusable alias config at {}", path.display())
         }
         ResolveError::Project { path, .. } => {
             format!("unreadable rojo project at {}", path.display())

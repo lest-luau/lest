@@ -123,7 +123,11 @@ return nil
 Three things to notice:
 
 - **`require('@lest')`** works because `lest init` wrote that alias into
-  `.luaurc`. If you declined it, require the framework by path instead —
+  `.luaurc`. In a project configured with `.config.luau`, init prints the
+  alias line to paste instead (aliases resolve from either format) — and
+  until you paste it, the generated example requires core by relative path.
+  If you declined the alias,
+  require the framework by path instead —
   `require('../.lest/core')`, adjusted for where the spec sits.
 - **The destructuring line** (`local describe, it, expect = ...`) is
   deliberate. Lest has no ambient globals: your specs require real `.luau`

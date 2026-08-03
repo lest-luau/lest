@@ -6,7 +6,10 @@
 //! builtins `@lune/*` and `@lute/*`, which are never resolved to disk — the
 //! native backend refuses them with a pointer to the right backend, and the
 //! spawned backends pass them straight through to the real runtime.
-//! `.luaurc` aliases and `@self` requires resolve here too. Rojo project
+//! Aliases resolve here too, from either config format the Luau ecosystem
+//! uses: `.luaurc` (JSONC-lenient) or `.config.luau` (a Luau file returning
+//! the config table, per the accepted RFC, evaluated in an isolated embedded
+//! VM). `@self` requires as well. Rojo project
 //! mapping (phase 4, [`VirtualDataModel`]) turns a `default.project.json` into
 //! a bidirectional filesystem ↔ DataModel map for the cloud backend; the pesde
 //! lockfile walk arrives in a later phase.
@@ -73,7 +76,7 @@ pub enum ResolveError {
         spec: String,
     },
     /// An `@` alias that is neither a runtime builtin, `@self`, nor defined
-    /// in any `.luaurc` up the directory tree.
+    /// in any `.luaurc` or `.config.luau` up the directory tree.
     UnknownAlias {
         spec: String,
     },
@@ -83,8 +86,10 @@ pub enum ResolveError {
     InvalidSelf {
         spec: String,
     },
-    /// A `.luaurc` on the lookup path could not be read or parsed.
-    Luaurc {
+    /// An alias config (`.luaurc` or `.config.luau`) on the lookup path could
+    /// not be read, parsed, or evaluated — or a directory holds both, which
+    /// the Luau config RFC forbids.
+    AliasConfig {
         path: PathBuf,
         message: String,
     },
@@ -108,13 +113,13 @@ impl fmt::Display for ResolveError {
             ),
             ResolveError::UnknownAlias { spec } => write!(
                 f,
-                "cannot resolve require(\"{spec}\"): unknown alias — not a runtime builtin (@lune/*, @lute/*), not @self, and no `.luaurc` up the tree defines it"
+                "cannot resolve require(\"{spec}\"): unknown alias — not a runtime builtin (@lune/*, @lute/*), not @self, and no `.luaurc` or `.config.luau` up the tree defines it"
             ),
             ResolveError::InvalidSelf { spec } => write!(
                 f,
                 "cannot resolve require(\"{spec}\"): `@self` is only valid as `@self/<module>` from within an init module"
             ),
-            ResolveError::Luaurc { path, message } => write!(
+            ResolveError::AliasConfig { path, message } => write!(
                 f,
                 "cannot read aliases from {}: {message}",
                 path.display()
@@ -160,11 +165,12 @@ pub fn resolve(requiring_file: &Path, spec: &str) -> Result<Resolved, ResolveErr
     Resolver::new().resolve(requiring_file, spec)
 }
 
-/// The parsed alias table of one `.luaurc`: alias names lowercased for the
-/// RFC's case-insensitive matching. `None` means the directory has no
-/// `.luaurc`; a parse failure is memoized too, so a broken file is read once
-/// and reported on every resolution that reaches it.
-type LuaurcAliases = Option<Result<HashMap<String, String>, ResolveError>>;
+/// The parsed alias table of one directory's config (`.luaurc` or
+/// `.config.luau`): alias names lowercased for the RFC's case-insensitive
+/// matching. `None` means the directory has neither file; a parse or
+/// evaluation failure is memoized too, so a broken file is read once and
+/// reported on every resolution that reaches it.
+type DirAliases = Option<Result<HashMap<String, String>, ResolveError>>;
 
 /// Memoized resolution state, scoped to one "run" of resolution work: a native
 /// VM's lifetime, one dependency-graph build, one cloud bundle.
@@ -178,8 +184,8 @@ type LuaurcAliases = Option<Result<HashMap<String, String>, ResolveError>>;
 /// fresh resolvers — when a `.luaurc` changes).
 #[derive(Debug, Default)]
 pub struct Resolver {
-    /// Normalized directory → its `.luaurc` alias table (see [`LuaurcAliases`]).
-    luaurc: RefCell<HashMap<PathBuf, LuaurcAliases>>,
+    /// Normalized directory → its alias table (see [`DirAliases`]).
+    aliases: RefCell<HashMap<PathBuf, DirAliases>>,
     /// Queried path → its canonical cache key, memoizing the
     /// `fs::canonicalize` syscall behind [`cache_key_path`].
     canonical: RefCell<HashMap<PathBuf, PathBuf>>,
@@ -224,9 +230,9 @@ impl Resolver {
         resolve_target(spec, &target)
     }
 
-    /// `.luaurc` aliases: walks up from the requiring file's directory; the
-    /// nearest `.luaurc` defining the alias wins, and its value is a path
-    /// relative to that `.luaurc`'s own directory (per the require-by-string
+    /// Config aliases: walks up from the requiring file's directory; the
+    /// nearest config defining the alias wins, and its value is a path
+    /// relative to that config's own directory (per the require-by-string
     /// RFC). Missing keys fall through to ancestor configs by continuing the
     /// walk. Alias names are matched case-insensitively (the RFC treats them
     /// so).
@@ -254,15 +260,29 @@ impl Resolver {
         })
     }
 
-    /// Looks `alias` up in `dir`'s `.luaurc`, reading and parsing the file at
-    /// most once per resolver lifetime. `Ok(None)` means "keep walking up":
-    /// either no `.luaurc` here, or one that does not define the alias.
+    /// Looks `alias` up in `dir`'s config (`.luaurc` or `.config.luau`),
+    /// reading and parsing (or evaluating) the file at most once per resolver
+    /// lifetime. `Ok(None)` means "keep walking up": either no config here,
+    /// or one that does not define the alias. A directory holding both files
+    /// is an error per the Luau config RFC — silently preferring one would
+    /// have lest resolve differently from every RFC-conforming tool.
     fn alias_in(&self, dir: &Path, alias: &str) -> Result<Option<String>, ResolveError> {
         let key = normalize(dir);
-        let mut cache = self.luaurc.borrow_mut();
+        let mut cache = self.aliases.borrow_mut();
         let entry = cache.entry(key).or_insert_with(|| {
             let luaurc = dir.join(".luaurc");
-            luaurc.is_file().then(|| parse_luaurc_aliases(&luaurc))
+            let config_luau = dir.join(".config.luau");
+            match (luaurc.is_file(), config_luau.is_file()) {
+                (false, false) => None,
+                (true, true) => Some(Err(ResolveError::AliasConfig {
+                    path: config_luau,
+                    message: "this directory holds both `.luaurc` and `.config.luau`, which \
+                              the Luau config RFC forbids — keep one"
+                        .to_string(),
+                })),
+                (true, false) => Some(parse_luaurc_aliases(&luaurc)),
+                (false, true) => Some(cached_config_luau_aliases(&config_luau)),
+            }
         });
         match entry {
             None => Ok(None),
@@ -321,12 +341,12 @@ fn resolve_self(requiring_file: &Path, spec: &str) -> Result<Resolved, ResolveEr
 /// the RFC's case-insensitive matching. Two keys that fold to the same name
 /// keep the first (matching the pre-memoization "first match wins" scan).
 fn parse_luaurc_aliases(path: &Path) -> Result<HashMap<String, String>, ResolveError> {
-    let text = std::fs::read_to_string(path).map_err(|e| ResolveError::Luaurc {
+    let text = std::fs::read_to_string(path).map_err(|e| ResolveError::AliasConfig {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
     let value: serde_json::Value =
-        serde_json::from_str(&sanitize_luaurc(&text)).map_err(|e| ResolveError::Luaurc {
+        serde_json::from_str(&sanitize_luaurc(&text)).map_err(|e| ResolveError::AliasConfig {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
@@ -339,6 +359,153 @@ fn parse_luaurc_aliases(path: &Path) -> Result<HashMap<String, String>, ResolveE
                     .or_insert_with(|| target.to_string());
             }
         }
+    }
+    Ok(aliases)
+}
+
+/// The RFC's default budget for evaluating a `.config.luau`. Generous for a
+/// config file; the ceiling exists because the format is real Luau and a
+/// stray `while true do end` must not hang every resolution forever.
+const CONFIG_LUAU_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`eval_config_luau_aliases`] behind a process-wide memo keyed by
+/// normalized path and invalidated by mtime. Resolvers are deliberately
+/// short-lived (native builds one per spec VM), which is fine for reading
+/// `.luaurc` but would boot a config VM per spec per directory here — and a
+/// config that exhausts its time budget would then cost that budget times
+/// the spec count. The mtime check keeps watch mode honest: an edited config
+/// re-evaluates on the next pass, which builds fresh Resolvers but shares
+/// this cache.
+fn cached_config_luau_aliases(path: &Path) -> Result<HashMap<String, String>, ResolveError> {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    type Cache = HashMap<
+        PathBuf,
+        (
+            Option<SystemTime>,
+            Result<HashMap<String, String>, ResolveError>,
+        ),
+    >;
+    static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(Default::default);
+
+    let key = normalize(path);
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((cached_mtime, result)) = cache.get(&key) {
+        if *cached_mtime == mtime {
+            return result.clone();
+        }
+    }
+    let result = eval_config_luau_aliases(path, CONFIG_LUAU_TIMEOUT);
+    cache.insert(key, (mtime, result.clone()));
+    result
+}
+
+/// Evaluates one `.config.luau` and extracts its alias table
+/// (`config.luau.aliases`, per the Luau config RFC), lowercasing alias names
+/// for the same case-insensitive matching `.luaurc` gets.
+///
+/// The RFC's evaluation model, followed here: the file is real Luau, run "in
+/// an isolated Luau VM with only the standard libraries enabled" — so
+/// computed configs work, but there is no `require`, no filesystem, and no
+/// escape hatch. The VM is fresh per file, sandboxed, memory-capped, and
+/// interrupt-bounded by `timeout`; it is discarded as soon as the table is
+/// read. Evaluating project-authored code at resolution time is not a new
+/// trust boundary — lest exists to run the project's own test code.
+fn eval_config_luau_aliases(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Result<HashMap<String, String>, ResolveError> {
+    use std::time::Instant;
+
+    let fail = |message: String| ResolveError::AliasConfig {
+        path: path.to_path_buf(),
+        message,
+    };
+
+    let text = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+    // Windows editors love UTF-8 BOMs; the Luau parser does not — same guard
+    // module sources get in the native backend.
+    let source = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let lua = mlua::Lua::new();
+    lua.sandbox(true).map_err(|e| fail(e.to_string()))?;
+    lua.set_memory_limit(64 * 1024 * 1024)
+        .map_err(|e| fail(e.to_string()))?;
+    let deadline = Instant::now() + timeout;
+    lua.set_interrupt(move |_| {
+        if Instant::now() >= deadline {
+            return Err(mlua::Error::RuntimeError(
+                "config evaluation exceeded its time budget".to_string(),
+            ));
+        }
+        Ok(mlua::VmState::Continue)
+    });
+
+    // `@` marks the chunk name as a filename, so Luau renders positions as
+    // `path:line:` and truncates long names at the head, keeping the file
+    // name visible. The traceback is trimmed off the message: this error
+    // reaches one-line diagnostics, and the trace is all inside the config
+    // file the message already names.
+    let value: mlua::Value = lua
+        .load(source)
+        .set_name(format!("@{}", path.display()))
+        .eval()
+        .map_err(|e| {
+            let rendered = e.to_string();
+            let message = rendered
+                .split("\nstack traceback:")
+                .next()
+                .unwrap_or(&rendered);
+            fail(message.trim_end().to_string())
+        })?;
+    let mlua::Value::Table(config) = value else {
+        return Err(fail(
+            "the file must return a table (`return { luau = { aliases = { … } } }`)".to_string(),
+        ));
+    };
+
+    // Absent keys are valid configs with no aliases; wrongly-typed keys are
+    // authoring mistakes worth naming, not silently empty alias sets.
+    let mut aliases = HashMap::new();
+    let luau: mlua::Value = config.get("luau").map_err(|e| fail(e.to_string()))?;
+    let table = match luau {
+        mlua::Value::Nil => return Ok(aliases),
+        mlua::Value::Table(table) => table,
+        other => {
+            return Err(fail(format!(
+                "the `luau` key must be a table, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let raw: mlua::Value = table.get("aliases").map_err(|e| fail(e.to_string()))?;
+    let map = match raw {
+        mlua::Value::Nil => return Ok(aliases),
+        mlua::Value::Table(map) => map,
+        other => {
+            return Err(fail(format!(
+                "`luau.aliases` must be a table of string → string, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    map.for_each(|name: mlua::Value, target: mlua::Value| {
+        if let (mlua::Value::String(name), mlua::Value::String(target)) = (name, target) {
+            pairs.push((name.to_string_lossy(), target.to_string_lossy()));
+        }
+        Ok(())
+    })
+    .map_err(|e| fail(e.to_string()))?;
+    // Luau table iteration is hash-ordered, so two names folding to the same
+    // lowercase key would otherwise pick an arbitrary (if stable) winner.
+    // Sorting first makes the rule deterministic and statable: the
+    // lexicographically first original spelling wins. (`.luaurc` keeps
+    // document order; a Luau table has no document order to keep.)
+    pairs.sort();
+    for (name, target) in pairs {
+        aliases.entry(name.to_lowercase()).or_insert(target);
     }
     Ok(aliases)
 }
