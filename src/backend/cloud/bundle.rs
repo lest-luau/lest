@@ -148,9 +148,10 @@ pub enum Head {
     Studio,
     /// Spawned Gargantuan engine run (`--script … --headless`): events print
     /// as sentinel-framed stdout lines, decoded live like lune/lute. The
-    /// engine cannot exit on its own, so the done marker is the completion
-    /// authority and the head pads stdout afterwards until the CLI kills the
-    /// process (see [`emit_gargantuan_head`]).
+    /// done marker is the completion authority; after it the head exits the
+    /// engine cleanly via `ProcessService:ExitAsync` where the engine has
+    /// it, and falls back to padding stdout until the CLI's kill on engines
+    /// that predate the service (see [`emit_gargantuan_head`]).
     Gargantuan,
 }
 
@@ -562,15 +563,18 @@ print({done_sentinel})
 
 /// The gargantuan entrypoint tail: the studio head's per-spec drive and
 /// sentinel framing, with two engine-shaped differences. Gargantuan has no
-/// HttpService, so the embedded pure-Luau encoder does the JSON. And the
-/// engine has no way to exit on its own (`ProcessService:Exit` is upstream
-/// future work), so after the done marker the head pads stdout in a
-/// `task.wait` loop until the CLI's kill lands: Luau's `print` never
-/// flushes, a killed process discards its stdio buffer, and pipe buffer
-/// sizes vary by platform — an unpadded (or fixed-size-padded) tail could
-/// strand the done marker in that buffer forever, turning every completed
-/// run into a budget expiry. The CLI stops echoing output once the marker
-/// is seen, so the padding never reaches the terminal.
+/// HttpService, so the embedded pure-Luau encoder does the JSON. And ending
+/// the run is two-mode: after the done marker the head calls
+/// `ProcessService:ExitAsync(0)` where the engine has it — the clean exit
+/// flushes stdout, carrying the marker out, and the CLI sees the process
+/// end on its own. On engines predating the service the `pcall` fails and
+/// the head falls back to padding stdout in a `task.wait` loop until the
+/// CLI's kill lands: Luau's `print` never flushes, a killed process
+/// discards its stdio buffer, and pipe buffer sizes vary by platform — an
+/// unpadded (or fixed-size-padded) tail could strand the done marker in
+/// that buffer forever, turning every completed run into a budget expiry.
+/// The CLI stops echoing output once the marker is seen, so the padding
+/// never reaches the terminal.
 fn emit_gargantuan_head(
     out: &mut String,
     input: &BundleInput,
@@ -673,7 +677,22 @@ end
 -- Orphan the last spec's emitter too: a straggler resuming during the
 -- padding below must stay silent, not print between padding lines.
 __lest_generation += 1
+-- The completion authority goes out first: nothing below may run before it.
 print({done_sentinel})
+-- pcall twice over: engines predating ProcessService throw on GetService,
+-- and the current engine's ExitAsync itself raises (an upstream
+-- argument-index bug reads the exit code from the self slot). Either
+-- failure falls through to the padding loop below; a working ExitAsync
+-- ends the process before the next frame — the clean exit flushes stdout,
+-- carrying the done marker out — and control never leaves the pcall.
+local __lest_exit_ok, __lest_process = pcall(function ()
+	return game:GetService('ProcessService')
+end)
+if __lest_exit_ok and __lest_process ~= nil then
+	pcall(function ()
+		__lest_process:ExitAsync(0)
+	end)
+end
 local __lest_pad = string.rep('=', 1024)
 while true do
 	print(__lest_pad)
@@ -1131,9 +1150,23 @@ mod tests {
         // doc comments legitimately mention JSONEncode in every bundle).
         assert!(script.contains("Encode.value(Sanitize.value(event))"));
         assert!(!script.contains("__lest_http"));
-        // The flush workaround: padding after the done marker, bounded by
-        // the CLI's kill.
-        assert!(script.contains("local __lest_pad"));
+        // The two-mode ending, with the order pinned: the done marker
+        // precedes the exit attempt (nothing may run before the completion
+        // authority), which precedes the padding fallback. The guard and
+        // the pcall around ExitAsync are asserted literally — a raising
+        // ExitAsync (the current upstream argument-index bug) must fall
+        // through to the padding, not kill the head.
+        let done_at = script
+            .find("'@@LEST_STU' .. 'DIO_DONE@@'")
+            .expect("split done marker in the head");
+        let exit_at = script
+            .find("__lest_process:ExitAsync(0)")
+            .expect("exit call in the head");
+        let pad_at = script.find("local __lest_pad").expect("padding fallback");
+        assert!(done_at < exit_at && exit_at < pad_at);
+        assert!(script.contains("game:GetService('ProcessService')"));
+        assert!(script.contains("if __lest_exit_ok and __lest_process ~= nil then"));
+        assert!(script.contains("pcall(function ()\n\t\t__lest_process:ExitAsync(0)"));
         assert!(script.contains("task.wait()"));
         // Shared machinery: scheduler deadline and the embedded modules,
         // the encoder among them.
