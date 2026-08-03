@@ -334,8 +334,14 @@ fn watchable(suites: Vec<Suite>) -> Vec<Suite> {
     suites
         .into_iter()
         // Cloud is excluded by physics (network round-trips per save);
-        // studio too — a full Studio boot per save is no loop at all.
-        .filter(|suite| suite.backend != BackendKind::Cloud && suite.backend != BackendKind::Studio)
+        // studio too — a full Studio boot per save is no loop at all — and
+        // gargantuan, whose engine boot and kill-based lifecycle are not a
+        // save-to-green loop either.
+        .filter(|suite| {
+            suite.backend != BackendKind::Cloud
+                && suite.backend != BackendKind::Studio
+                && suite.backend != BackendKind::Gargantuan
+        })
         .collect()
 }
 

@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::report::{Event, Failure};
 
 pub mod cloud;
+pub mod gargantuan;
 pub mod native;
 pub mod runtime;
 pub mod studio;
@@ -41,6 +42,11 @@ pub struct SuitePlan {
     /// `[studio] executable` — the Roblox Studio binary, for non-standard
     /// installs. Only the studio backend consults it.
     pub studio_executable: Option<PathBuf>,
+    /// `[gargantuan] binary` — the Gargantuan engine executable. The engine
+    /// has no releases yet, so most projects must point this at a local
+    /// build; `None` falls back to `gargantuan` on PATH. Only the gargantuan
+    /// backend consults it.
+    pub gargantuan_binary: Option<PathBuf>,
 }
 
 /// Root-relative display form of a spec path, with forward slashes.

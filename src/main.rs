@@ -813,6 +813,7 @@ pub fn run_suites_with(
             coverage: params.coverage && suite.backend == BackendKind::Native,
             rojo_project: suite.place.rojo.as_ref().map(|project| root.join(project)),
             studio_executable: config.studio_executable.as_ref().map(|exe| root.join(exe)),
+            gargantuan_binary: config.gargantuan_binary.as_ref().map(|exe| root.join(exe)),
         };
 
         let mut suite_totals = Totals::default();
@@ -936,6 +937,7 @@ pub fn run_suites_with(
                 }
                 BackendKind::Cloud => backend::cloud::run(&plan, &suite.place, &mut sink),
                 BackendKind::Studio => backend::studio::run(&plan, &suite.place, &mut sink),
+                BackendKind::Gargantuan => backend::gargantuan::run(&plan, &mut sink),
             }
         };
 
@@ -1039,7 +1041,15 @@ pub fn select_suites(
         config
             .suites
             .iter()
-            .filter(|suite| suite.default_enabled || (ci && suite.backend != BackendKind::Studio))
+            // Studio needs a GUI session; gargantuan needs a locally built
+            // engine binary. Neither exists on a CI runner, so `$CI`
+            // auto-enable skips both — explicit naming still runs them.
+            .filter(|suite| {
+                suite.default_enabled
+                    || (ci
+                        && suite.backend != BackendKind::Studio
+                        && suite.backend != BackendKind::Gargantuan)
+            })
             .cloned()
             .collect()
     } else {

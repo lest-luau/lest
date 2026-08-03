@@ -622,6 +622,7 @@ mod tests {
             coverage: true,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         };
         // On case-insensitive hosts, hand the loader a deliberately mangled
         // spelling — the filesystem still finds the file, and attribution must
@@ -683,6 +684,7 @@ mod tests {
             coverage: false,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         };
         let (events, _coverage) = run_spec_file(&plan, &spec).unwrap();
         // The cycle surfaces as the spec's load failure — and it must be

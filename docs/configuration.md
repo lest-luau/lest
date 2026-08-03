@@ -88,7 +88,7 @@ never re-run on save — not running it at all is the consistent reading.
 Where this suite's specs run, overriding the top-level default. See
 [Backends](backends.md).
 
-- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
+- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"` · `"gargantuan"`
 - **Default:** `[settings] backend`
 
 ### `default`
@@ -167,7 +167,7 @@ file at the project root. See [Backends → cloud](backends.md#cloud).
 
 The default backend for suites that don't declare one.
 
-- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"`
+- **Type:** `"native"` · `"lune"` · `"lute"` · `"cloud"` · `"studio"` · `"gargantuan"`
 - **Default:** `"native"`
 
 Precedence for where a suite runs: the `--backend` CLI flag, then the

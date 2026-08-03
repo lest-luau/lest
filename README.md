@@ -142,6 +142,7 @@ neither knows nor cares where a test ran.
 | `lute` | A spawned `lute run` process | Scripts using `@lute/*`, code transforms, tooling | — | ✅ |
 | `cloud` | A real Roblox place via Open Cloud | Instances, services, the DataModel — in CI | — | — |
 | `studio` | A launched Roblox Studio | The same engine code, locally, zero clicks | — | — |
+| `gargantuan` | A spawned headless [Gargantuan](https://github.com/teamfireworks/gargantuan) engine | Gargantuan engine code (experimental) | — | — |
 
 ```toml
 [suites.unit]

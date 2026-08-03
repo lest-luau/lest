@@ -19,6 +19,9 @@ pub enum BackendKind {
     Cloud,
     /// Roblox Studio, launched per run via its official CLI.
     Studio,
+    /// The Gargantuan engine, spawned headless per run. Experimental — the
+    /// engine itself is pre-release.
+    Gargantuan,
 }
 
 impl fmt::Display for BackendKind {
@@ -29,6 +32,7 @@ impl fmt::Display for BackendKind {
             BackendKind::Lute => "lute",
             BackendKind::Cloud => "cloud",
             BackendKind::Studio => "studio",
+            BackendKind::Gargantuan => "gargantuan",
         };
         f.write_str(name)
     }
@@ -57,6 +61,8 @@ struct RawConfig {
     place: RawPlace,
     #[serde(default)]
     studio: RawStudio,
+    #[serde(default)]
+    gargantuan: RawGargantuan,
 }
 
 /// The `[place]` table: the Roblox place engine suites run in, agnostic of
@@ -79,6 +85,14 @@ struct RawPlace {
 #[derive(Debug, Default, Deserialize)]
 struct RawStudio {
     executable: Option<String>,
+}
+
+/// The `[gargantuan]` table: settings for spawning the Gargantuan engine.
+/// Only the binary path today — the engine has no releases, so most projects
+/// point this at a local build.
+#[derive(Debug, Default, Deserialize)]
+struct RawGargantuan {
+    binary: Option<String>,
 }
 
 /// Open Cloud target for cloud-backend suites. `universe_id`/`place_id` are
@@ -195,6 +209,9 @@ pub struct Config {
     /// `[studio] executable` — a path to the Roblox Studio binary, for
     /// non-standard installs. `None` means the platform default location.
     pub studio_executable: Option<String>,
+    /// `[gargantuan] binary` — a path to the Gargantuan engine executable.
+    /// `None` means `gargantuan` on PATH.
+    pub gargantuan_binary: Option<String>,
     /// The `lest.toml` this config was read from, or `None` in zero-config
     /// mode. Carried so callers can point at the real file (watch mode watches
     /// it by identity; the empty-discovery message only mentions a config file
@@ -389,7 +406,14 @@ fn unknown_keys(text: &str) -> Vec<String> {
     // list (with its collect calls below) by hand, or removed spellings
     // will be silently ignored with no warning at all.
     const TOP: &[&str] = &[
-        "backend", "suites", "settings", "coverage", "cloud", "place", "studio",
+        "backend",
+        "suites",
+        "settings",
+        "coverage",
+        "cloud",
+        "place",
+        "studio",
+        "gargantuan",
     ];
     const SUITE: &[&str] = &["include", "backend", "default", "cloud", "place"];
     const SETTINGS: &[&str] = &["backend", "timeout_ms", "workers", "rojo", "core"];
@@ -397,6 +421,7 @@ fn unknown_keys(text: &str) -> Vec<String> {
     const CLOUD: &[&str] = &["universe_id", "place_id", "place_file"];
     const PLACE: &[&str] = &["universe_id", "place_id", "file", "rojo"];
     const STUDIO: &[&str] = &["executable"];
+    const GARGANTUAN: &[&str] = &["binary"];
 
     fn collect(prefix: &str, table: &toml::Table, known: &[&str], out: &mut Vec<String>) {
         for key in table.keys() {
@@ -432,6 +457,9 @@ fn unknown_keys(text: &str) -> Vec<String> {
     }
     if let Some(studio) = table(root, "studio") {
         collect("studio.", studio, STUDIO, &mut out);
+    }
+    if let Some(gargantuan) = table(root, "gargantuan") {
+        collect("gargantuan.", gargantuan, GARGANTUAN, &mut out);
     }
     if let Some(suites) = table(root, "suites") {
         for (name, suite) in suites {
@@ -563,6 +591,7 @@ fn resolve_raw(raw: RawConfig) -> Result<Config, ToolError> {
         core: raw.settings.core,
         coverage,
         studio_executable: raw.studio.executable,
+        gargantuan_binary: raw.gargantuan.binary,
         // Filled in by `load`, which is the only place that knows the path.
         file: None,
     })
@@ -986,6 +1015,46 @@ mod tests {
             "#,
         );
         assert_eq!(config.studio_executable, None);
+    }
+
+    #[test]
+    fn gargantuan_backend_and_binary_are_parsed() {
+        let config = parse(
+            r#"
+            [suites.engine-gg]
+            include = ["tests/gg/**/*.spec.luau"]
+            backend = "gargantuan"
+            default = false
+
+            [gargantuan]
+            binary = "vendor/gargantuan/build/gargantuan"
+            "#,
+        );
+        assert_eq!(config.suites[0].backend, BackendKind::Gargantuan);
+        assert!(!config.suites[0].default_enabled);
+        assert_eq!(
+            config.gargantuan_binary.as_deref(),
+            Some("vendor/gargantuan/build/gargantuan")
+        );
+        let config = parse(
+            r#"
+            [suites.unit]
+            include = ["src/**/*.spec.luau"]
+            "#,
+        );
+        assert_eq!(config.gargantuan_binary, None);
+    }
+
+    #[test]
+    fn gargantuan_table_keys_are_checked() {
+        let found = unknown_keys(
+            r#"
+            [gargantuan]
+            binary = "x"
+            executable = "y"
+            "#,
+        );
+        assert_eq!(found, vec!["gargantuan.executable".to_string()]);
     }
 
     #[test]
