@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "lest"
-version = "0.6.0-canary.1"
+version = "0.6.0-canary.2"
 dependencies = [
  "clap",
  "dotenvy",

@@ -1,6 +1,6 @@
 [package]
 name = "lest"
-version = "0.6.0-canary.1"
+version = "0.6.0-canary.2"
 edition = "2021"
 description = "lest: a testing toolchain for Luau"
 license = "MIT"
