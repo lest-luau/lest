@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::report::{check_protocol_version, Event, Failure};
 use crate::resolve::{normalize, on_disk_spelling, Resolved, Resolver};
-use mlua::{Compiler, Error as LuaError, Function, Lua, Table, Value, VmState};
+use mlua::{chunk::Compiler, Error as LuaError, Function, Lua, Table, Value, VmState};
 
 use crate::backend::{display_rel, EventSink, SuitePlan};
 use crate::error::ToolError;
