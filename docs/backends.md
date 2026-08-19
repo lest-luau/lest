@@ -281,11 +281,14 @@ the result — with no `binary` configured, Lest looks for `gargantuan` on
 Excluded from watch mode and from `$CI` auto-enable; run it by naming the
 suite explicitly.
 
-How a run ends depends on the engine build: on engines with
-`ProcessService`, Lest's generated entrypoint exits the engine cleanly
-(`ExitAsync(0)`) once the suite completes; on builds that predate the
-service (or whose `ExitAsync` fails), Lest kills the engine a few
-seconds after the suite's completion marker arrives — deliberate, not an
+Lest adapts to whatever stdio the engine build offers, probing each
+capability once per run rather than requiring a version. On a current
+build, results travel through `ProcessService:WriteToStdout` (verbatim,
+so the engine's log decoration never wraps them), `FlushStdout` puts each
+result on the wire as it happens, and `ExitAsync(0)` ends the engine
+cleanly once the suite finishes. Older builds degrade a step at a time:
+`print` carries results instead, and Lest kills the engine a few seconds
+after the suite's completion marker arrives — deliberate, not an
 error.
 
 ## Overriding a backend
