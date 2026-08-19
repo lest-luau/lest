@@ -8,16 +8,19 @@
 //! module inlines and nothing delegates), and the process is driven exactly
 //! like lune/lute — sentinel-framed events decoded live off a stdout pipe.
 //!
-//! One thing is unlike either: the run's ending is the CLI's to arrange.
-//! The done marker is the completion authority, and what follows it is
-//! two-mode. On engines with `ProcessService`, the head calls
-//! `ExitAsync(0)` right after the marker: the engine exits cleanly, the
-//! exit flushes stdio, and the CLI just reaps the child. On engines that
-//! predate the service, nothing can stop the loop headless — the head pads
-//! stdout in its place (a killed process discards its stdio buffer and
-//! Luau's `print` never flushes, so an unpadded marker could sit in the
-//! pipe buffer forever) and the CLI kills the process after a short grace
-//! wait, deliberately.
+//! One thing is unlike either: the engine's stdio contract is young, so the
+//! head probes it rather than assuming it (see `emit_gargantuan_head`).
+//! `ProcessService:WriteToStdout` carries protocol lines verbatim where it
+//! exists, `FlushStdout` puts them on the wire as they happen, and
+//! `ExitAsync(0)` ends the run cleanly once the done marker is out. Each
+//! missing piece degrades one step: `print` instead of a verbatim write
+//! (the engine's logger then decorates the line, which the CLI's mid-line
+//! marker search still decodes), padding instead of a flush, and the kill
+//! below instead of a clean exit.
+//!
+//! The done marker is the completion authority either way. Seeing it starts
+//! a short grace wait for the engine to exit itself; the kill is what
+//! happens when it does not.
 //!
 //! Experimental, stated plainly: the engine is pre-release, unversioned, and
 //! restructuring quickly. The spawn contract this backend leans on
@@ -52,9 +55,9 @@ const STDERR_TAIL_LINES: usize = 20;
 /// How long after the done marker the CLI waits for the engine to exit on
 /// its own before killing it. An engine whose `ProcessService:ExitAsync`
 /// works exits within milliseconds of the marker; one without the service —
-/// or with the current upstream argument-index bug that makes `ExitAsync`
-/// raise — runs the head's padding fallback instead and spends the full
-/// grace before the kill. The cost of not needing a version probe.
+/// or from the window where `ExitAsync` shipped with an argument-index bug
+/// that made it raise — never exits headless, so it spends the full grace
+/// before the kill. The cost of asking the engine rather than versioning it.
 const EXIT_GRACE: Duration = Duration::from_secs(3);
 
 pub fn run(plan: &SuitePlan, on_event: &mut EventSink) -> Result<(), ToolError> {
