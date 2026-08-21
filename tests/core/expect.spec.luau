@@ -355,7 +355,7 @@ describe('expect', function ()
 end)
 
 describe('skipping', function ()
-	Lest.xit('is reported but never executed', function ()
+	it.skip('is reported but never executed', function ()
 		error('this must never run')
 	end)
 end)

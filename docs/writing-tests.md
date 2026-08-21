@@ -105,25 +105,76 @@ cascade of unrelated assertion failures. Descendant blocks of a failed
 Same-named sibling `describe` blocks get independent hooks and state; blocks are
 identified by position, not by label.
 
-## Skipping a test
+## Skipping and focusing
 
-`Lest.xit` registers a test that is reported but never executed. The body is
+`it` and `describe` both carry modifiers. They are ordinary fields on the same
+callable, so the destructuring line at the top of your spec keeps working:
+
+```luau
+local describe, it, expect = Lest.describe, Lest.it, Lest.expect
+```
+
+### `it.skip` and `describe.skip`
+
+`it.skip` registers a test that is reported but never executed. The body is
 optional, so you can park an intention before you've written one, and an
 optional third argument gives the skip a reason that reporters surface:
 
 ```luau
-local xit = Lest.xit
+it.skip('handles unicode escapes')
 
-xit('handles unicode escapes')
-
-xit('handles surrogate pairs', function ()
+it.skip('handles surrogate pairs', function ()
 	-- kept for when the encoder lands
 end, 'waiting on the encoder')
 ```
 
+`describe.skip` skips every test in a block, giving each the reason
+`describe.skip`. The bodies are still collected, so names and nesting appear in
+the report exactly as they would have.
+
 Skipped tests appear in the summary as `skipped` — with the reason, when one
 was given (`○ handles surrogate pairs (skipped: waiting on the encoder)`) —
-and never affect the exit code.
+and never affect the exit code, unless they were skipped by a focus modifier
+under [`--forbid-only`](cli.md#--forbid-only).
+
+> `xit` was removed in 0.6. `it.skip` replaces it with the same signature, so
+> the migration is a rename.
+
+### `it.todo`
+
+`it.todo(name)` records a test you intend to write. It takes no body — passing
+one is an error rather than a silently ignored implementation — and reports as
+skipped with the reason `todo`:
+
+```luau
+it.todo('rejects a negative quantity')
+```
+
+### `it.only` and `describe.only`
+
+`it.only` focuses a test: when any test in a spec file is focused, only focused
+tests run and every other test is reported as skipped.
+
+```luau
+it.only('the one I am debugging', function ()
+	expect(cart.total({ 3, 4 })).toBe(7)
+end)
+```
+
+Focus is **per spec file** — each file gets its own VM on the native backend,
+so focusing in one file never silences another. It also composes with `-t`:
+the filter narrows first, and focus narrows what remains.
+
+Tests excluded this way are reported with the reason `skipped by .only`, and
+the run ends with a note counting them, because a focused test committed by
+accident silently stops running everything around it. On CI, make that fatal:
+
+```console
+$ lest --forbid-only
+```
+
+which exits 1 if any test was excluded by a focus modifier. See
+[CLI reference](cli.md#--forbid-only).
 
 ## Assertions
 

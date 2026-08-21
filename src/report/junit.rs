@@ -184,7 +184,9 @@ impl<W: Write> Junit<W> {
                 };
                 self.push(path, name, *duration_ms, outcome);
             }
-            Event::TestSkip { path, name, reason } => self.push(
+            Event::TestSkip {
+                path, name, reason, ..
+            } => self.push(
                 path,
                 name,
                 0.0,
@@ -430,6 +432,7 @@ mod tests {
                 path: vec![],
                 name: "later".into(),
                 reason: Some("wip".into()),
+                focus_excluded: false,
             },
         ]);
         assert!(out.starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#));

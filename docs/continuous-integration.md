@@ -15,8 +15,9 @@ how a broken pipeline reports green.
 | `2` | Tool error |
 
 The line between `1` and `2` is deliberate. A test that times out, a spec that
-fails to load, an assertion that fails, a `--min` coverage shortfall — those are
-**test failures** (1). The project ran and didn't meet its own standard.
+fails to load, an assertion that fails, a `--min` coverage shortfall, a
+committed `.only` under `--forbid-only` — those are **test failures** (1). The
+project ran and didn't meet its own standard.
 
 A backend that can't start, a config that won't parse, a protocol line that
 won't decode, a suite that produces no outcomes at all, a coverage minimum with

@@ -508,6 +508,7 @@ fn event_from_table(table: &Table) -> Result<Event, String> {
             path: get_path(table)?,
             name: get_string(table, "name")?,
             reason: get_opt_string(table, "reason")?,
+            focus_excluded: get_bool(table, "focusExcluded")?,
         },
         "snapshot" => Event::Snapshot {
             path: get_path(table)?,
@@ -519,6 +520,7 @@ fn event_from_table(table: &Table) -> Result<Event, String> {
             passed: get_u32(table, "passed")?,
             failed: get_u32(table, "failed")?,
             skipped: get_u32(table, "skipped")?,
+            focus_used: get_bool(table, "focusUsed")?,
         },
         other => return Err(format!("unknown event kind \"{other}\"")),
     };
@@ -553,6 +555,15 @@ fn get_string(table: &Table, key: &str) -> Result<String, String> {
 fn get_opt_string(table: &Table, key: &str) -> Result<Option<String>, String> {
     table
         .get::<Option<String>>(key)
+        .map_err(|e| format!("event field \"{key}\": {e}"))
+}
+
+/// An absent optional boolean reads as `false`, matching the wire rule that a
+/// nil field is simply off the wire.
+fn get_bool(table: &Table, key: &str) -> Result<bool, String> {
+    table
+        .get::<Option<bool>>(key)
+        .map(|value| value.unwrap_or(false))
         .map_err(|e| format!("event field \"{key}\": {e}"))
 }
 

@@ -89,6 +89,12 @@ pub enum Event {
         name: String,
         #[serde(default)]
         reason: Option<String>,
+        /// Set when the test was runnable but excluded by a focus modifier
+        /// (`it.only` / `describe.only`) elsewhere in its spec file. Consumers
+        /// key off this rather than the reason string. Additive in 0.6;
+        /// protocol stays v1, the `origin` precedent from 0.3.0.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        focus_excluded: bool,
     },
     Snapshot {
         path: Vec<String>,
@@ -100,6 +106,12 @@ pub enum Event {
         passed: u32,
         failed: u32,
         skipped: u32,
+        /// A focus modifier was in effect for this run. Distinct from any
+        /// `focusExcluded` skip: a spec file focused in its entirety excludes
+        /// nothing, yet the committed `.only` is still what `--forbid-only`
+        /// exists to catch. Additive in 0.6; protocol stays v1.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        focus_used: bool,
     },
 }
 
@@ -246,7 +258,8 @@ mod tests {
             Event::TestSkip {
                 path: vec![],
                 name: "later".into(),
-                reason: None
+                reason: None,
+                focus_excluded: false,
             }
         );
     }
@@ -291,11 +304,13 @@ mod tests {
             path: vec![],
             name: "b".into(),
             reason: None,
+            focus_excluded: false,
         });
         totals.record(&Event::RunEnd {
             passed: 1,
             failed: 0,
             skipped: 1,
+            focus_used: false,
         });
         assert_eq!(
             totals,
