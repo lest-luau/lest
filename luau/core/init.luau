@@ -27,9 +27,36 @@ type Test = {
 	name: string,
 	fn: (() -> ())?,
 	skip: boolean,
-	--- Optional skip reason (`xit` only), carried on the `test_skip` event.
+	--- Optional skip reason (`it.skip`/`it.todo`, or an enclosing
+	--- `describe.skip`), carried on the `test_skip` event.
 	reason: string?,
+	--- Registered under `it.only` or inside a `describe.only`. When any
+	--- selected test carries this, every test without it is excluded from the
+	--- run — decided per run, never by mutating the registry.
+	focus: boolean,
 }
+
+export type TestBody = () -> ()
+
+--- `it` is a callable table so the modifiers hang off it while the
+--- destructuring convention (`local describe, it = Lest.describe, Lest.it`)
+--- keeps working unchanged.
+export type It = typeof(setmetatable(
+	{} :: {
+		only: (name: string, fn: TestBody) -> (),
+		skip: (name: string, fn: TestBody?, reason: string?) -> (),
+		todo: (name: string) -> (),
+	},
+	{} :: { __call: (any, name: string, fn: TestBody) -> () }
+))
+
+export type Describe = typeof(setmetatable(
+	{} :: {
+		only: (name: string, body: () -> ()) -> (),
+		skip: (name: string, body: () -> ()) -> (),
+	},
+	{} :: { __call: (any, name: string, body: () -> ()) -> () }
+))
 
 type HookKind = 'beforeAll' | 'beforeEach' | 'afterEach' | 'afterAll'
 
@@ -60,6 +87,12 @@ local nextHookSeq = 0
 -- snapshot keys and be indistinguishable to reports and `-t` filtering, so a
 -- duplicate is a collection-time error instead.
 local registeredFullNames: { [string]: boolean } = {}
+-- Nesting depth of enclosing `describe.only` / `describe.skip` bodies. Every
+-- test registered while a counter is positive inherits that modifier. Counters
+-- rather than booleans so nesting unwinds correctly, and module state — so
+-- `reset` and `capture` must both account for them.
+local focusDepth = 0
+local skipDepth = 0
 -- True while `Lest.run` is executing. The runner snapshots the registry up
 -- front but used to scan hooks live, so a `describe`/`it`/hook called mid-run
 -- (from inside a test body) either silently vanished or silently attached at
@@ -92,20 +125,37 @@ local function errorText (err: any): string
 	return tostring(err)
 end
 
-function Lest.describe (name: string, body: () -> ())
-	assertNotRunning('describe')
+--- Collects one describe block. `focus`/`skip` raise the corresponding depth
+--- counter for the duration of the body, so every test registered inside
+--- inherits the modifier — including tests in nested describes.
+local function enterDescribe (api: string, name: string, body: () -> (), focus: boolean, skip: boolean)
+	assertNotRunning(api)
 	nextScopeId += 1
 	table.insert(pathStack, name)
 	table.insert(scopeStack, nextScopeId)
+	if focus then
+		focusDepth += 1
+	end
+	if skip then
+		skipDepth += 1
+	end
 	local ok, err = pcall(body)
+	-- Unwound before the error is re-raised: a body that throws must not leak
+	-- its modifier onto everything registered afterwards.
+	if skip then
+		skipDepth -= 1
+	end
+	if focus then
+		focusDepth -= 1
+	end
 	table.remove(scopeStack)
 	table.remove(pathStack)
 	if not ok then
-		error(`error while collecting describe('{name}'): {errorText(err)}`, 0)
+		error(`error while collecting {api}('{name}'): {errorText(err)}`, 0)
 	end
 end
 
-local function registerTest (api: string, name: string, fn: (() -> ())?, skip: boolean, reason: string?)
+local function registerTest (api: string, name: string, fn: (() -> ())?, skip: boolean, reason: string?, focus: boolean)
 	assertNotRunning(api)
 	local path = table.clone(pathStack)
 	local full = if #path == 0 then name else table.concat(path, ' ') .. ' ' .. name
@@ -117,25 +167,63 @@ local function registerTest (api: string, name: string, fn: (() -> ())?, skip: b
 		)
 	end
 	registeredFullNames[full] = true
+	-- An enclosing `describe.skip` skips its tests; skip wins over focus, so an
+	-- `it.skip` inside a `describe.only` stays skipped rather than being pulled
+	-- into the focused set.
+	local inheritedSkip = skipDepth > 0
 	table.insert(registry, {
 		path = path,
 		scopePath = table.clone(scopeStack),
 		name = name,
 		fn = fn,
-		skip = skip,
-		reason = reason,
+		skip = skip or inheritedSkip,
+		reason = if reason ~= nil then reason elseif inheritedSkip then 'describe.skip' else nil,
+		focus = focus or focusDepth > 0,
 	})
 end
 
-function Lest.it (name: string, fn: () -> ())
-	registerTest('it', name, fn, false, nil)
-end
+Lest.describe = setmetatable({
+	--- Focuses this block: when any test in the file is focused, only focused
+	--- tests run and the rest are reported as skipped.
+	only = function (name: string, body: () -> ())
+		enterDescribe('describe.only', name, body, true, false)
+	end,
+	--- Skips every test in this block. The bodies are still collected, so
+	--- names, nesting, and the duplicate-name guard behave normally.
+	skip = function (name: string, body: () -> ())
+		enterDescribe('describe.skip', name, body, false, true)
+	end,
+}, {
+	__call = function (_self: any, name: string, body: () -> ())
+		enterDescribe('describe', name, body, false, false)
+	end,
+}) :: Describe
 
---- Skipped test: registered so it is reported, never executed. An optional
---- `reason` rides on the `test_skip` event for reporters to show.
-function Lest.xit (name: string, fn: (() -> ())?, reason: string?)
-	registerTest('xit', name, fn, true, reason)
-end
+Lest.it = setmetatable({
+	--- Focuses this test; see `describe.only`. Focus is per spec file, which
+	--- falls out of one VM per file on the native backend.
+	only = function (name: string, fn: TestBody)
+		registerTest('it.only', name, fn, false, nil, true)
+	end,
+	--- Skipped test: registered so it is reported, never executed. An optional
+	--- `reason` rides on the `test_skip` event for reporters to show.
+	skip = function (name: string, fn: TestBody?, reason: string?)
+		registerTest('it.skip', name, fn, true, reason, false)
+	end,
+	--- A test that is planned but not written. Reported as skipped with the
+	--- reason `todo`; passing a body is an error rather than a silently
+	--- ignored implementation.
+	todo = function (name: string, ...: any)
+		if select('#', ...) > 0 then
+			error(`it.todo('{name}') takes no body — use it.skip to park a written test`, 0)
+		end
+		registerTest('it.todo', name, nil, true, 'todo', false)
+	end,
+}, {
+	__call = function (_self: any, name: string, fn: TestBody)
+		registerTest('it', name, fn, false, nil, false)
+	end,
+}) :: It
 
 local function addHook (kind: HookKind, fn: () -> ())
 	assertNotRunning(kind)
@@ -183,6 +271,8 @@ function Lest.reset ()
 	nextHookSeq = 0
 	registeredFullNames = {}
 	running = false
+	focusDepth = 0
+	skipDepth = 0
 end
 
 --- Runs a self-contained suite in isolation: saves the current registration,
@@ -198,6 +288,10 @@ function Lest.capture (register: () -> (), options: RunOptions?): { { [string]: 
 	-- running test, so the nested registration must not trip the mid-run guard:
 	-- the flag is stashed and cleared here, and restored with everything else.
 	local savedFullNames, savedRunning = registeredFullNames, running
+	-- A `capture` called from inside a `describe.only`/`describe.skip` body
+	-- must collect its own scenario unfocused and unskipped, then hand the
+	-- enclosing depths back untouched.
+	local savedFocusDepth, savedSkipDepth = focusDepth, skipDepth
 	-- The nested run clears the snapshot context after each of *its* tests. When
 	-- `capture` is called from inside a running test — which is how lest's own
 	-- specs use it — that would strand the enclosing test without a context and
@@ -212,6 +306,8 @@ function Lest.capture (register: () -> (), options: RunOptions?): { { [string]: 
 	nextHookSeq = 0
 	registeredFullNames = {}
 	running = false
+	focusDepth = 0
+	skipDepth = 0
 
 	local events: { { [string]: any } } = {}
 	local ok, err = pcall(function ()
@@ -229,6 +325,8 @@ function Lest.capture (register: () -> (), options: RunOptions?): { { [string]: 
 	nextHookSeq = savedHookSeq
 	registeredFullNames = savedFullNames
 	running = savedRunning
+	focusDepth = savedFocusDepth
+	skipDepth = savedSkipDepth
 	context.restore(savedContext)
 
 	if not ok then
@@ -336,9 +434,36 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 		end
 	end
 
-	-- `specCount` counts the *tests* about to run (after filtering), not spec
-	-- files; the name is a wire field kept for compatibility. Hosts synthesize
-	-- their own run framing, so nothing consumes it today.
+	-- Focus is decided *within* the filtered set, so `-t` narrows first and
+	-- `.only` narrows what remains. A filter that excludes every focused test
+	-- therefore runs the rest normally rather than reporting an empty run.
+	-- Focus engages only when a focused test would actually *execute*. A
+	-- focused test that is also skipped (`it.only` left inside a
+	-- `describe.skip`) or bodyless (`it.only('x')` with the body forgotten)
+	-- would otherwise switch focus on while running nothing itself, skipping
+	-- every other test in the file and reporting a green run over zero
+	-- executed tests — the false green this project refuses everywhere else.
+	local anyFocused = false
+	for _, test in tests do
+		if test.focus and not test.skip and test.fn ~= nil then
+			anyFocused = true
+			break
+		end
+	end
+
+	--- Whether this test would execute: not skipped, has a body, and either
+	--- nothing is focused or it is. Focus-excluded tests count as
+	--- non-executable everywhere, so a fully focused-out describe never runs
+	--- its once-hooks.
+	local function willRun (test: Test): boolean
+		return not test.skip and test.fn ~= nil and (not anyFocused or test.focus)
+	end
+
+	-- `specCount` counts the *selected* tests — post-filter, but before skips
+	-- and focus exclusion are applied, so it is an upper bound on what runs
+	-- rather than a count of executions. Not spec files either; the name is a
+	-- wire field kept for compatibility. Hosts synthesize their own run
+	-- framing, so nothing consumes it today.
 	emit({ kind = 'run_start', specCount = #tests, protocolVersion = PROTOCOL_VERSION })
 	local passed, failed, skipped = 0, 0, 0
 
@@ -348,7 +473,7 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 	-- root scope is keyed by the empty string.
 	local hasExecutable: { [string]: boolean } = {}
 	for _, test in tests do
-		if not test.skip and test.fn ~= nil then
+		if willRun(test) then
 			for depth = 0, #test.scopePath do
 				local prefix = table.move(test.scopePath, 1, depth, 1, {})
 				hasExecutable[scopeKey(prefix)] = true
@@ -517,11 +642,22 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 
 		emit({ kind = 'test_start', path = test.path, name = test.name })
 
-		if test.skip or test.fn == nil then
+		if not willRun(test) then
 			skipped += 1
-			-- `reason` is nil unless `xit` was given one; a nil field simply
-			-- stays off the wire (`test_skip.reason` is optional).
-			emit({ kind = 'test_skip', path = test.path, name = test.name, reason = test.reason })
+			-- Excluded purely by someone else's `.only` — the test is otherwise
+			-- runnable, which is what makes it worth flagging: `focusExcluded`
+			-- lets the CLI count these and `--forbid-only` fail on them.
+			-- Consumers key off the boolean, never the reason string.
+			local excluded = anyFocused and not test.focus and not test.skip and test.fn ~= nil
+			emit({
+				kind = 'test_skip',
+				path = test.path,
+				name = test.name,
+				-- `reason` stays nil (and off the wire) unless one was given or
+				-- inherited; `test_skip.reason` is optional.
+				reason = if excluded then 'skipped by .only' else test.reason,
+				focusExcluded = if excluded then true else nil,
+			})
 			continue
 		end
 
@@ -624,7 +760,17 @@ function Lest.run (emit: Emit, options: RunOptions?): (number, number, number)
 	end
 
 	running = false
-	emit({ kind = 'run_end', passed = passed, failed = failed, skipped = skipped })
+	-- `focusUsed` reports that a focus modifier was in effect at all, which is
+	-- not the same as tests having been excluded: a spec file focused in its
+	-- entirety excludes nothing here, yet the committed `.only` is still the
+	-- defect `--forbid-only` exists to catch. Off the wire when false.
+	emit({
+		kind = 'run_end',
+		passed = passed,
+		failed = failed,
+		skipped = skipped,
+		focusUsed = if anyFocused then true else nil,
+	})
 	return passed, failed, skipped
 end
 

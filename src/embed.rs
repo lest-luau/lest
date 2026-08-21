@@ -149,7 +149,11 @@ mod tests {
             .iter()
             .find(|(name, _)| *name == "init.luau")
             .unwrap();
-        assert!(init.contains("function Lest.describe"));
+        // Matched on the API surface rather than a definition's spelling:
+        // `describe`/`it` are callable tables, so how they are *declared* is
+        // an implementation detail this assertion should not pin.
+        assert!(init.contains("Lest.describe = setmetatable"));
+        assert!(init.contains("function Lest.run"));
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    builtin_runtime, cache_key, cache_key_path, content_hash, hash_bytes, normalize, resolve,
-    DependencyGraph, ResolveError, Resolved, Runtime,
+    builtin_runtime, cache_key, cache_key_path, content_hash, eval_config_luau_aliases, hash_bytes,
+    normalize, resolve, DependencyGraph, ResolveError, Resolved, Runtime,
 };
 
 /// Writes `contents` to `rel` under `dir`, creating parent directories.
@@ -402,8 +402,156 @@ fn malformed_luaurc_reports_error() {
     let dir = tree(&["main.luau"]);
     write(dir.path(), ".luaurc", "{ this is not json ]");
     match resolve(&dir.path().join("main.luau"), "@util") {
-        Err(ResolveError::Luaurc { .. }) => {}
-        other => panic!("expected a Luaurc parse error, got {other:?}"),
+        Err(ResolveError::AliasConfig { .. }) => {}
+        other => panic!("expected an AliasConfig parse error, got {other:?}"),
+    }
+}
+
+// ── .config.luau: the RFC's Luau-syntax config, evaluated in an embedded VM ──
+
+#[test]
+fn config_luau_alias_resolves() {
+    let dir = tree(&["libs/util.luau", "src/mod.luau"]);
+    write(
+        dir.path(),
+        ".config.luau",
+        "return { luau = { aliases = { util = './libs/util' } } }\n",
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@util", "libs/util.luau");
+}
+
+#[test]
+fn config_luau_aliases_match_case_insensitively() {
+    let dir = tree(&["libs/util.luau", "src/mod.luau"]);
+    write(
+        dir.path(),
+        ".config.luau",
+        "return { luau = { aliases = { Util = './libs/util' } } }\n",
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@UTIL", "libs/util.luau");
+}
+
+#[test]
+fn config_luau_may_compute_its_aliases() {
+    // The RFC allows real Luau — variables, loops, functions — so a computed
+    // config must evaluate, not merely parse.
+    let dir = tree(&["libs/util.luau", "src/mod.luau"]);
+    write(
+        dir.path(),
+        ".config.luau",
+        "local libs = './li' .. 'bs'\nlocal t = {}\nt.util = libs .. '/util'\n\
+         return { luau = { aliases = t } }\n",
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@util", "libs/util.luau");
+}
+
+#[test]
+fn config_luau_nearest_wins_over_ancestor_luaurc() {
+    // Mixed formats up one tree: the nearer config wins per alias, exactly
+    // as two .luaurc files would.
+    let dir = tree(&["libs/near.luau", "libs/far.luau", "src/mod.luau"]);
+    write(
+        dir.path(),
+        "src/.config.luau",
+        "return { luau = { aliases = { util = '../libs/near' } } }\n",
+    );
+    write(
+        dir.path(),
+        ".luaurc",
+        r#"{ "aliases": { "util": "libs/far" } }"#,
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@util", "libs/near.luau");
+}
+
+#[test]
+fn both_configs_in_one_directory_error() {
+    let dir = tree(&["libs/util.luau", "main.luau"]);
+    write(
+        dir.path(),
+        ".luaurc",
+        r#"{ "aliases": { "util": "libs/util" } }"#,
+    );
+    write(
+        dir.path(),
+        ".config.luau",
+        "return { luau = { aliases = { util = './libs/util' } } }\n",
+    );
+    match resolve(&dir.path().join("main.luau"), "@util") {
+        Err(ResolveError::AliasConfig { message, .. }) => {
+            assert!(message.contains("both"), "message was: {message}");
+        }
+        other => panic!("expected the both-configs error, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_luau_that_does_not_return_a_table_errors() {
+    let dir = tree(&["main.luau"]);
+    write(dir.path(), ".config.luau", "return 42\n");
+    match resolve(&dir.path().join("main.luau"), "@util") {
+        Err(ResolveError::AliasConfig { message, .. }) => {
+            assert!(message.contains("return a table"), "message was: {message}");
+        }
+        other => panic!("expected an AliasConfig error, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_luau_with_a_syntax_error_reports_it() {
+    let dir = tree(&["main.luau"]);
+    write(dir.path(), ".config.luau", "return { luau = ");
+    match resolve(&dir.path().join("main.luau"), "@util") {
+        Err(ResolveError::AliasConfig { .. }) => {}
+        other => panic!("expected an AliasConfig error, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_luau_without_aliases_falls_through_to_ancestors() {
+    let dir = tree(&["libs/util.luau", "src/mod.luau"]);
+    // A valid config with no aliases must not shadow the ancestor's table.
+    write(
+        dir.path(),
+        "src/.config.luau",
+        "return { luau = { languagemode = 'strict' } }\n",
+    );
+    write(
+        dir.path(),
+        ".luaurc",
+        r#"{ "aliases": { "util": "libs/util" } }"#,
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@util", "libs/util.luau");
+}
+
+#[test]
+fn config_luau_case_collisions_resolve_deterministically() {
+    // Two spellings folding to one case-insensitive name: Luau tables have
+    // no document order, so the rule is "lexicographically first original
+    // spelling wins" — here `Util` (ASCII 'U' < 'u') over `util`.
+    let dir = tree(&["a.luau", "b.luau", "src/mod.luau"]);
+    write(
+        dir.path(),
+        ".config.luau",
+        "return { luau = { aliases = { util = './b', Util = './a' } } }\n",
+    );
+    assert_resolves(dir.path(), "src/mod.luau", "@util", "a.luau");
+}
+
+#[test]
+fn config_luau_that_never_finishes_hits_the_time_budget() {
+    // Direct call with a tiny budget: the resolve() path wires the RFC's 2s
+    // default, which would cost this suite two real seconds to demonstrate.
+    let dir = tree(&["main.luau"]);
+    write(dir.path(), ".config.luau", "while true do end\n");
+    let result = eval_config_luau_aliases(
+        &dir.path().join(".config.luau"),
+        std::time::Duration::from_millis(50),
+    );
+    match result {
+        Err(ResolveError::AliasConfig { message, .. }) => {
+            assert!(message.contains("budget"), "message was: {message}");
+        }
+        other => panic!("expected the time-budget error, got {other:?}"),
     }
 }
 

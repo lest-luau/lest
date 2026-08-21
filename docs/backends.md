@@ -11,6 +11,8 @@ CI output — neither knows nor cares where a test ran.
 | [`lune`](#lune--lute) | A spawned `lune run` process | — | ✅ |
 | [`lute`](#lune--lute) | A spawned `lute run` process | — | ✅ |
 | [`cloud`](#cloud) | A real Roblox place via Open Cloud | — | — |
+| [`studio`](#studio) | A launched Roblox Studio | — | — |
+| [`gargantuan`](#gargantuan-experimental) | A spawned headless Gargantuan engine | — | — |
 
 **No backend fakes an environment.** Nothing mocks Instances, and nothing
 reimplements a runtime's standard library. If a test needs an environment, Lest
@@ -249,6 +251,45 @@ matters the moment a spec asks `IsServer()` or touches DataStores
 ([Execution context](studio.md#execution-context)). The studio backend
 refuses to run under `$CI`, and watch mode does not include it. Details and
 troubleshooting: **[Studio](studio.md)**.
+
+## gargantuan (experimental)
+
+[Gargantuan](https://github.com/teamfireworks/gargantuan) is an independent,
+Roblox-shaped game engine scripted with Luau — a `game` DataModel,
+Instances, Signals, a `task` library. The gargantuan backend runs specs
+inside the real engine, headless: Lest bundles the suite (the same bundler
+as cloud and studio), spawns `gargantuan --script <bundle> --headless`, and
+decodes sentinel-framed events from its stdout with the lune/lute decoder (in bursts rather than live — the engine never flushes `print`).
+No emulation, per the usual rule — specs get the engine's actual Instances
+because they genuinely run in it.
+
+```toml
+[suites.engine-gg]
+include = ["tests/gargantuan/**/*.spec.luau"]
+backend = "gargantuan"
+default = false
+
+[gargantuan]
+binary = "vendor/gargantuan/build/gargantuan"
+```
+
+**Experimental, stated plainly.** The engine is pre-release: it has no
+tagged releases (build it from source and point `[gargantuan] binary` at
+the result — with no `binary` configured, Lest looks for `gargantuan` on
+`PATH`), and an API surface that is still filling in, so specs will find
+`not yet implemented` edges. Those are engine facts, not test failures.
+Excluded from watch mode and from `$CI` auto-enable; run it by naming the
+suite explicitly.
+
+Lest adapts to whatever stdio the engine build offers, probing each
+capability once per run rather than requiring a version. On a current
+build, results travel through `ProcessService:WriteToStdout` (verbatim,
+so the engine's log decoration never wraps them), `FlushStdout` puts each
+result on the wire as it happens, and `ExitAsync(0)` ends the engine
+cleanly once the suite finishes. Older builds degrade a step at a time:
+`print` carries results instead, and Lest kills the engine a few seconds
+after the suite's completion marker arrives — deliberate, not an
+error.
 
 ## Overriding a backend
 

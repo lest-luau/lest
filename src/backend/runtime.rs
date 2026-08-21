@@ -122,6 +122,25 @@ pub(crate) fn passthrough(leading: &str) {
     }
 }
 
+/// The done marker only *frames* a line when no event marker precedes it: a
+/// legitimate event payload (a snapshot's text, a failure message) may
+/// contain the marker characters, and dropping that line would lose a real
+/// verdict. The first-marker-wins rule from `classify`, applied to the done
+/// marker. Shared by the studio and gargantuan backends, whose runs end on
+/// this marker rather than on a process exit.
+pub(crate) fn is_done_framed(line: &str) -> bool {
+    match line.find(DONE_SENTINEL) {
+        None => false,
+        Some(done_at) => {
+            let framing = [line.find(SENTINEL), line.find(SPEC_SENTINEL)]
+                .into_iter()
+                .flatten()
+                .min();
+            framing.is_none_or(|other_at| done_at < other_at)
+        }
+    }
+}
+
 /// Reports an exhausted process budget as a *test* failure (exit 1), not a
 /// tool error (exit 2) — the same call native makes when its interrupt fires.
 /// Shared by the mid-stream deadline check and the post-EOF wait, so both

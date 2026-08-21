@@ -63,6 +63,15 @@ needs an Open Cloud key and a place — see [Backends](backends.md#cloud).
 
 ## Before you open a pull request
 
+**Open it against `canary`, not `main`.** Every change lands on `canary` first,
+where it ships as a `0.x.0-canary.N` prerelease; `main` carries the stable
+releases. GitHub defaults a new pull request to `main`, so this is the easy one
+to miss — if you already opened one there, the **Edit** button beside the pull
+request title switches the base branch, and nothing else about the pull request
+changes.
+
+Then, locally:
+
 ```console
 $ cargo fmt --all --check
 $ cargo clippy --all-targets --locked -- -D warnings   # must be clean, not merely compiling

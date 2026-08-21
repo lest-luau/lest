@@ -463,6 +463,7 @@ mod tests {
             coverage: false,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         }
     }
 
@@ -696,6 +697,7 @@ mod tests {
             coverage: false,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         };
         let mut sink = |_: Option<&Path>, _: &Event| {};
 
@@ -757,6 +759,7 @@ mod tests {
             coverage: false,
             rojo_project: Some(root.join("default.project.json")),
             studio_executable: None,
+            gargantuan_binary: None,
         };
         let transport = RoutedCloud::new();
         let mut sink = |_: Option<&Path>, _: &Event| {};

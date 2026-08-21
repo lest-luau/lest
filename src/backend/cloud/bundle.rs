@@ -120,8 +120,11 @@ fn brief_reason(error: &ResolveError) -> String {
         }
         ResolveError::UnknownAlias { .. } => "unknown alias".to_string(),
         ResolveError::InvalidSelf { .. } => "@self is only valid from an init module".to_string(),
-        ResolveError::Luaurc { path, .. } => {
-            format!("unreadable .luaurc at {}", path.display())
+        ResolveError::AliasConfig { path, .. } => {
+            // "Unusable", not "unreadable": the variant also covers the
+            // RFC-forbidden state of `.luaurc` and `.config.luau` sharing a
+            // directory, where both files read fine.
+            format!("unusable alias config at {}", path.display())
         }
         ResolveError::Project { path, .. } => {
             format!("unreadable rojo project at {}", path.display())
@@ -143,6 +146,13 @@ pub enum Head {
     /// A done marker after the last spec is the completion authority — a
     /// GUI quit is a weaker signal than a process exit.
     Studio,
+    /// Spawned Gargantuan engine run (`--script … --headless`): events print
+    /// as sentinel-framed stdout lines, decoded live like lune/lute. The
+    /// done marker is the completion authority; after it the head exits the
+    /// engine cleanly via `ProcessService:ExitAsync` where the engine has
+    /// it, and falls back to padding stdout until the CLI's kill on engines
+    /// that predate the service (see [`emit_gargantuan_head`]).
+    Gargantuan,
 }
 
 /// Everything the bundler needs to emit one self-contained entrypoint.
@@ -328,9 +338,14 @@ pub fn bundle_with_cache(
         )?;
     }
     // The CLI-embedded in-engine runtime, inlined from compiled-in source
-    // under fixed `lr_*` ids.
+    // under fixed `lr_*` ids — but only the modules this head actually
+    // drives. Cloud submits one bundle per spec file, so an unused module
+    // is not just dead bytes on disk but dead bytes uploaded N times.
+    let embedded_ids = embedded_ids_for(input.head);
     for module in EMBEDDED {
-        emit_embedded(&mut out, module, &mut source_map);
+        if embedded_ids.contains(&module.id) {
+            emit_embedded(&mut out, module, &mut source_map);
+        }
     }
 
     // ── Entrypoint ──────────────────────────────────────────────────────────
@@ -338,6 +353,7 @@ pub fn bundle_with_cache(
     match input.head {
         Head::Cloud => emit_cloud_head(&mut out, input, &core_id, &id_of)?,
         Head::Studio => emit_studio_head(&mut out, input, &core_id, &id_of)?,
+        Head::Gargantuan => emit_gargantuan_head(&mut out, input, &core_id, &id_of)?,
     }
 
     Ok(Bundle {
@@ -545,6 +561,196 @@ print({done_sentinel})
     Ok(())
 }
 
+/// The gargantuan entrypoint tail: the studio head's per-spec drive and
+/// sentinel framing, with two engine-shaped differences. Gargantuan has no
+/// HttpService, so the embedded pure-Luau encoder does the JSON. And both
+/// halves of the engine's stdio contract are *probed*, never assumed —
+/// the engine is pre-release, so each capability is tried once up front and
+/// the head degrades a step at a time rather than requiring a version:
+///
+/// - `ProcessService:WriteToStdout` puts protocol lines on stdout verbatim.
+///   Without it, `print` carries them instead, and the engine's logger wraps
+///   each one in `[INFO] Lua:` decoration plus a timestamp — still decodable
+///   (the CLI finds markers mid-line), but only because that decoration
+///   happens to break where it does.
+/// - `ProcessService:FlushStdout` puts each event on the wire as it happens.
+///   Without it, output sits in the pipe buffer, so the head pads stdout in
+///   a `task.wait` loop after the done marker: a killed process discards its
+///   stdio buffer and pipe buffer sizes vary by platform, so an unpadded
+///   tail could strand the marker there forever and turn every completed run
+///   into a budget expiry. With a flush, the padding is pointless and skipped.
+/// - `ProcessService:ExitAsync` ends the run cleanly, exit code and all.
+///   Without it, the CLI kills the process after its grace window.
+///
+/// The CLI stops echoing output once the marker is seen, so neither the
+/// padding nor anything after it reaches the terminal.
+fn emit_gargantuan_head(
+    out: &mut String,
+    input: &BundleInput,
+    core_id: &str,
+    id_of: &BTreeMap<PathBuf, String>,
+) -> Result<(), ToolError> {
+    use crate::backend::runtime::{DONE_SENTINEL, SENTINEL, SPEC_SENTINEL};
+
+    let module_id = |path: &Path| -> Result<String, ToolError> {
+        id_of.get(&normalize(path)).cloned().ok_or_else(|| {
+            ToolError(format!(
+                "cannot bundle {} for the gargantuan suite: it is not in the computed require \
+                 closure",
+                path.display()
+            ))
+        })
+    };
+
+    out.push_str("-- Entrypoint: stream each spec's events as sentinel-framed stdout lines.\n");
+    out.push_str(&format!("local Lest = __lest_require('{core_id}')\n"));
+    out.push_str(&format!(
+        "local Scheduler = __lest_require('{SCHEDULER_ID}')\n"
+    ));
+    out.push_str(&format!(
+        "local Sanitize = __lest_require('{SANITIZE_ID}')\n"
+    ));
+    out.push_str(&format!("local Encode = __lest_require('{ENCODE_ID}')\n"));
+    // One capability probe for the whole run, before any spec loads: each
+    // method is *called*, not merely looked up, because a name can exist on
+    // an engine whose implementation still raises (ExitAsync shipped with an
+    // argument-index bug that did exactly that). Probing with an empty write
+    // and a no-op flush costs nothing and produces no output.
+    out.push_str(
+        "local __lest_process = nil\n\
+         local __lest_can_write = false\n\
+         local __lest_can_flush = false\n\
+         do\n\
+         \tlocal ok, service = pcall(function ()\n\
+         \t\treturn game:GetService('ProcessService')\n\
+         \tend)\n\
+         \tif ok and service ~= nil then\n\
+         \t\t__lest_process = service\n\
+         \t\t__lest_can_write = pcall(function ()\n\
+         \t\t\tservice:WriteToStdout('')\n\
+         \t\tend)\n\
+         \t\tif __lest_can_write then\n\
+         \t\t\t__lest_can_flush = pcall(function ()\n\
+         \t\t\t\tservice:FlushStdout()\n\
+         \t\t\tend)\n\
+         \t\tend\n\
+         \tend\n\
+         end\n\
+         local function __lest_write (line)\n\
+         \tif __lest_can_write then\n\
+         \t\t__lest_process:WriteToStdout(line, '\\n')\n\
+         \t\tif __lest_can_flush then\n\
+         \t\t\t__lest_process:FlushStdout()\n\
+         \t\tend\n\
+         \telse\n\
+         \t\tprint(line)\n\
+         \tend\n\
+         end\n",
+    );
+    // Gargantuan's `task.cancel` errors ("not yet implemented"), so a spec
+    // the scheduler abandons at its deadline is not actually stopped — the
+    // engine resumes it on later frames, and its late events would stream
+    // into the *next* spec's attribution (misfiled snapshots included).
+    // Each spec therefore emits through a generation-stamped closure:
+    // bumping the generation orphans every closure handed to earlier specs,
+    // so a stale thread's emissions drop instead of misattributing.
+    out.push_str(&format!(
+        "local __lest_generation = 0\n\
+         local function __lest_make_emit ()\n\
+         \tlocal generation = __lest_generation\n\
+         \treturn function (event)\n\
+         \t\tif generation ~= __lest_generation then\n\
+         \t\t\treturn\n\
+         \t\tend\n\
+         \t\t__lest_write({sent} .. Encode.value(Sanitize.value(event)))\n\
+         \tend\n\
+         end\n",
+        sent = split_marker(SENTINEL)
+    ));
+
+    out.push_str("local __lest_specs = {\n");
+    for spec in input.specs {
+        let spec_id = module_id(&spec.path)?;
+        out.push_str(&format!(
+            "\t{{ name = '{}', load = function () return __lest_require('{spec_id}') end }},\n",
+            luau_escape(&spec.name),
+        ));
+    }
+    out.push_str("}\n");
+
+    let name_filter = match input.name_filter {
+        Some(filter) => format!("'{}'", luau_escape(filter)),
+        None => "nil".to_string(),
+    };
+
+    // The same load/timeout/error synthesis as the studio head; the padding
+    // loop after the done marker is what the module doc above explains.
+    out.push_str(&format!(
+        r#"for __lest_index, spec in __lest_specs do
+	__lest_write({spec_sentinel} .. tostring(__lest_index))
+	__lest_generation += 1
+	local __lest_emit = __lest_make_emit()
+	Lest.reset()
+	local ok, err = pcall(spec.load)
+	if not ok then
+		__lest_emit({{
+			kind = 'test_fail', path = {{ spec.name }}, name = '(load)',
+			durationMs = 0,
+			failure = {{ type = 'error', message = tostring(err), trace = '' }},
+		}})
+	else
+		local result = Scheduler.runSuite(function ()
+			Lest.run(__lest_emit, {{ nameFilter = {name_filter} }})
+		end, {{ task = task, deadlineMs = {deadline} }})
+		if result.timedOut then
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(timeout)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = 'spec exceeded its deadline', trace = '' }},
+			}})
+		elseif result.error ~= nil then
+			-- Same guard as the cloud head: a captured mid-run error must
+			-- surface, or the remaining tests vanish behind a green run.
+			__lest_emit({{
+				kind = 'test_fail', path = {{ spec.name }}, name = '(error)',
+				durationMs = result.durationMs,
+				failure = {{ type = 'error', message = tostring(result.error), trace = '' }},
+			}})
+		end
+	end
+end
+-- Orphan the last spec's emitter too: a straggler resuming during whatever
+-- follows must stay silent, not write between the lines below.
+__lest_generation += 1
+-- The completion authority goes out first: nothing below may run before it.
+__lest_write({done_sentinel})
+if __lest_process ~= nil then
+	-- ExitAsync parks this thread and the engine exits with our code, so
+	-- control never returns here. It raises on engines carrying the
+	-- argument-index bug it shipped with, hence the pcall: that failure has
+	-- to leave the fallback below reachable.
+	pcall(function ()
+		__lest_process:ExitAsync(0)
+	end)
+end
+if not __lest_can_flush then
+	-- No flush to force the done marker out of the pipe buffer, and the exit
+	-- above did not happen — pad until the CLI's kill lands.
+	local __lest_pad = string.rep('=', 1024)
+	while true do
+		print(__lest_pad)
+		task.wait()
+	end
+end
+"#,
+        spec_sentinel = split_marker(SPEC_SENTINEL),
+        done_sentinel = split_marker(DONE_SENTINEL),
+        deadline = input.deadline_ms,
+    ));
+
+    Ok(())
+}
+
 /// One module of the CLI-embedded in-engine runtime.
 struct EmbeddedModule {
     /// Base name, matched against `require('./name')` / `require('@self/name')`.
@@ -556,6 +762,7 @@ struct EmbeddedModule {
 const COLLECTOR_ID: &str = "lr_collector";
 const SCHEDULER_ID: &str = "lr_scheduler";
 const SANITIZE_ID: &str = "lr_sanitize";
+const ENCODE_ID: &str = "lr_encode";
 
 /// The in-engine runtime the cloud entrypoint drives: a collector that buffers
 /// protocol events for the task to return, the task-scheduler integration that
@@ -583,7 +790,28 @@ const EMBEDDED: &[EmbeddedModule] = &[
         id: "lr_sanitize",
         source: include_str!("../../../luau/runtime/cloud/sanitize.luau"),
     },
+    // Not under cloud/: the encoder serves any head whose engine offers no
+    // JSON service (gargantuan today), and lives next to the harness template
+    // whose inline encoder it mirrors.
+    EmbeddedModule {
+        name: "encode",
+        id: ENCODE_ID,
+        source: include_str!("../../../luau/runtime/encode.luau"),
+    },
 ];
+
+/// The embedded modules a head's generated tail actually requires,
+/// transitively (the collector requires sanitize as a sibling). Kept next to
+/// the head emitters that hold the matching `__lest_require` lines — a head
+/// that gains a require must gain an id here, and the module-reference
+/// completeness test catches the mismatch.
+fn embedded_ids_for(head: Head) -> &'static [&'static str] {
+    match head {
+        Head::Cloud => &[COLLECTOR_ID, SCHEDULER_ID, SANITIZE_ID],
+        Head::Studio => &[SCHEDULER_ID, SANITIZE_ID],
+        Head::Gargantuan => &[SCHEDULER_ID, SANITIZE_ID, ENCODE_ID],
+    }
+}
 
 /// Resolves an embedded module's require arg (`./sanitize`, `@self/sanitize`)
 /// to a sibling embedded module id by its final path segment.
@@ -928,6 +1156,84 @@ mod tests {
         assert!(script.contains("deadlineMs = 1234"));
         assert!(script.contains("'only these'"));
         for id in ["lr_scheduler", "lr_sanitize"] {
+            assert!(
+                script.contains(&format!("__lest_modules['{id}']")),
+                "embedded module {id} must inline"
+            );
+        }
+    }
+
+    #[test]
+    fn gargantuan_head_encodes_without_httpservice_and_pads_after_done() {
+        let root = repo_root();
+        let spec = root.join("tests/core/expect.spec.luau");
+        let specs = vec![SpecEntry {
+            name: "tests/core/expect.spec".to_string(),
+            path: spec.clone(),
+        }];
+        let input = BundleInput {
+            core_entry: &core_entry(&root),
+            specs: &specs,
+            name_filter: None,
+            head: Head::Gargantuan,
+            deadline_ms: 4321,
+            place: None,
+        };
+        let bundle = bundle(&input).expect("bundle should succeed");
+        let script = bundle.script;
+
+        // The marker discipline studio established holds here for the same
+        // reason: erroring source can end up echoed into the framed channel,
+        // and a whole marker in source would decode as a broken event.
+        assert!(!script.contains(crate::backend::runtime::SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::SPEC_SENTINEL));
+        assert!(!script.contains(crate::backend::runtime::DONE_SENTINEL));
+        assert!(script.contains("'@@LE' .. 'ST@@'"));
+        // No engine JSON service: the embedded encoder does the work. The
+        // negative is matched on the studio head's local (embedded module
+        // doc comments legitimately mention JSONEncode in every bundle).
+        assert!(script.contains("Encode.value(Sanitize.value(event))"));
+        assert!(!script.contains("__lest_http"));
+        // The two-mode ending, with the order pinned: the done marker
+        // precedes the exit attempt (nothing may run before the completion
+        // authority), which precedes the padding fallback. The guard and
+        // the pcall around ExitAsync are asserted literally — a raising
+        // ExitAsync (the current upstream argument-index bug) must fall
+        // through to the padding, not kill the head.
+        let done_at = script
+            .find("'@@LEST_STU' .. 'DIO_DONE@@'")
+            .expect("split done marker in the head");
+        let exit_at = script
+            .find("__lest_process:ExitAsync(0)")
+            .expect("exit call in the head");
+        let pad_at = script.find("local __lest_pad").expect("padding fallback");
+        assert!(done_at < exit_at && exit_at < pad_at);
+        assert!(script.contains("pcall(function ()\n\t\t__lest_process:ExitAsync(0)"));
+        // Every stdio capability is probed by *calling* it, since a method
+        // can exist on an engine whose implementation raises.
+        let probe_at = script
+            .find("game:GetService('ProcessService')")
+            .expect("service probe");
+        assert!(script.contains("service:WriteToStdout('')"));
+        assert!(script.contains("service:FlushStdout()"));
+        assert!(probe_at < done_at, "the probe must precede any emission");
+        // Protocol lines go through the writer, never bare `print`: on
+        // engines with WriteToStdout that keeps the frame free of the
+        // logger's decoration.
+        assert!(script.contains(
+            "__lest_write({sent} .. Encode.value(Sanitize.value(event))"
+                .replace("{sent}", "'@@LE' .. 'ST@@'")
+                .as_str()
+        ));
+        assert!(script.contains("__lest_process:WriteToStdout(line, '\\n')"));
+        assert!(!script.contains("print('@@LE' .. 'ST@@'"));
+        // The padding fallback exists only for engines that cannot flush.
+        assert!(script.contains("if not __lest_can_flush then"));
+        assert!(script.contains("task.wait()"));
+        // Shared machinery: scheduler deadline and the embedded modules,
+        // the encoder among them.
+        assert!(script.contains("deadlineMs = 4321"));
+        for id in ["lr_scheduler", "lr_sanitize", "lr_encode"] {
             assert!(
                 script.contains(&format!("__lest_modules['{id}']")),
                 "embedded module {id} must inline"

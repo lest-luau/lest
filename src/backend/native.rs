@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::report::{check_protocol_version, Event, Failure};
 use crate::resolve::{normalize, on_disk_spelling, Resolved, Resolver};
-use mlua::{Compiler, Error as LuaError, Function, Lua, Table, Value, VmState};
+use mlua::{chunk::Compiler, Error as LuaError, Function, Lua, Table, Value, VmState};
 
 use crate::backend::{display_rel, EventSink, SuitePlan};
 use crate::error::ToolError;
@@ -508,6 +508,7 @@ fn event_from_table(table: &Table) -> Result<Event, String> {
             path: get_path(table)?,
             name: get_string(table, "name")?,
             reason: get_opt_string(table, "reason")?,
+            focus_excluded: get_bool(table, "focusExcluded")?,
         },
         "snapshot" => Event::Snapshot {
             path: get_path(table)?,
@@ -519,6 +520,7 @@ fn event_from_table(table: &Table) -> Result<Event, String> {
             passed: get_u32(table, "passed")?,
             failed: get_u32(table, "failed")?,
             skipped: get_u32(table, "skipped")?,
+            focus_used: get_bool(table, "focusUsed")?,
         },
         other => return Err(format!("unknown event kind \"{other}\"")),
     };
@@ -553,6 +555,15 @@ fn get_string(table: &Table, key: &str) -> Result<String, String> {
 fn get_opt_string(table: &Table, key: &str) -> Result<Option<String>, String> {
     table
         .get::<Option<String>>(key)
+        .map_err(|e| format!("event field \"{key}\": {e}"))
+}
+
+/// An absent optional boolean reads as `false`, matching the wire rule that a
+/// nil field is simply off the wire.
+fn get_bool(table: &Table, key: &str) -> Result<bool, String> {
+    table
+        .get::<Option<bool>>(key)
+        .map(|value| value.unwrap_or(false))
         .map_err(|e| format!("event field \"{key}\": {e}"))
 }
 
@@ -622,6 +633,7 @@ mod tests {
             coverage: true,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         };
         // On case-insensitive hosts, hand the loader a deliberately mangled
         // spelling — the filesystem still finds the file, and attribution must
@@ -683,6 +695,7 @@ mod tests {
             coverage: false,
             rojo_project: None,
             studio_executable: None,
+            gargantuan_binary: None,
         };
         let (events, _coverage) = run_spec_file(&plan, &spec).unwrap();
         // The cycle surfaces as the spec's load failure — and it must be
