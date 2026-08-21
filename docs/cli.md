@@ -72,6 +72,21 @@ Force every selected suite onto one backend for this run: `native`, `lune`,
 `lute`, `cloud`, `studio`, or `gargantuan`. A debugging override — see
 [Backends](backends.md#overriding-a-backend).
 
+#### `--forbid-only`
+
+Fail (exit 1) when any test was excluded by a focus modifier (`it.only` or
+`describe.only`).
+
+```console
+$ lest --forbid-only
+```
+
+A focused test silences every other test in its spec file, so one committed by
+accident quietly stops running the rest. Every run reports how many tests were
+excluded; this flag turns that note into a failure, which is what you want in
+CI. It's a **test-suite defect, not a tool error** — exit 1, alongside failing
+tests, never 2. See [Writing tests](writing-tests.md#itonly-and-describeonly).
+
 ### Watch mode
 
 #### `--watch`

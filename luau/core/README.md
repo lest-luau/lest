@@ -37,8 +37,9 @@ Matchers are plain dot-call functions closing over the expected value:
 `toBeNil` / `toNotBeNil`, `toBeA`, `toContain`, `toHaveLength`,
 `toBeGreaterThan[OrEqual]`, `toBeLessThan[OrEqual]`, `toBeCloseTo`, `toMatch`,
 `toThrow` / `toNotThrow`, `toMatchSnapshot`. Lifecycle hooks: `beforeAll`,
-`beforeEach`, `afterEach`, `afterAll` — plus `xit`, which registers a test that
-is reported but never executed.
+`beforeEach`, `afterEach`, `afterAll`. `it` and `describe` are callable tables
+carrying modifiers: `it.skip` / `it.todo` / `it.only` and `describe.skip` /
+`describe.only`.
 
 This is **not** a package you install. `build.rs` compiles these sources into
 the `lest` binary, which writes them to `.lest/core` on demand — so the runner

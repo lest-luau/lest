@@ -131,6 +131,16 @@ pub struct RunArgs {
     #[arg(long, value_name = "PCT")]
     min: Option<f64>,
 
+    /// Fail (exit 1) when a focus modifier (`it.only` / `describe.only`) is in
+    /// effect anywhere in the run. For CI, where a committed `.only` silently
+    /// stops running everything around it.
+    ///
+    /// Rejected alongside `--watch` for the same reason `--changed` is: watch
+    /// mode is where focusing a test is the *point*, and a flag that silently
+    /// does nothing is worse than one that costs a little time.
+    #[arg(long, conflicts_with = "watch")]
+    forbid_only: bool,
+
     /// Run only the specs affected by files changed since this git ref.
     ///
     /// Rejected alongside `--watch`: watch mode already selects by change, from
@@ -536,6 +546,32 @@ fn execute_run(args: RunArgs) -> Result<i32, ToolError> {
         ));
     }
 
+    // A focused test silences everything around it, so a run that skipped
+    // tests for that reason says so — and `--forbid-only` makes it fatal,
+    // because a committed `.only` is a defect in the suite (exit 1), not a
+    // broken tool.
+    if outcome.focus_excluded > 0 {
+        let plural = if outcome.focus_excluded == 1 { "" } else { "s" };
+        crate::report::note_to_stderr(&format!(
+            "{} test{plural} skipped by .only",
+            outcome.focus_excluded
+        ));
+    }
+    // Keyed on focus being *used*, not on anything having been excluded: a
+    // spec file focused in its entirety silences nothing today and everything
+    // the moment a test is added to it.
+    if args.forbid_only && outcome.focus_used {
+        eprint!(
+            "{}",
+            render_diagnostic(
+                Severity::Failure,
+                "a focus modifier (.only) is committed, and --forbid-only is set",
+                err_color,
+            )
+        );
+        code = code.max(1);
+    }
+
     Ok(code)
 }
 
@@ -656,6 +692,14 @@ pub struct RunOutcome {
     pub specs: usize,
     pub snapshots: SnapshotSummary,
     pub coverage: Option<CoverageData>,
+    /// Tests that would have run but were excluded by a focus modifier
+    /// somewhere in their spec file. Drives the end-of-run note.
+    pub focus_excluded: u32,
+    /// A focus modifier was in effect anywhere in the run, whether or not it
+    /// excluded anything. Drives `--forbid-only`: a spec file focused in its
+    /// entirety excludes nothing, and the committed `.only` is still the
+    /// defect worth failing on.
+    pub focus_used: bool,
 }
 
 impl RunOutcome {
@@ -723,6 +767,8 @@ pub fn run_suites_with(
 ) -> Result<RunOutcome, ToolError> {
     let mut reporter = make_reporter(params.reporter, params.color, extras.report_to_stderr);
     let mut totals = Totals::default();
+    let mut focus_excluded = 0u32;
+    let mut focus_used = false;
     // A run is "filtered" whenever it did not execute every test in every
     // discovered spec, which is what makes obsolete-key detection unsound —
     // see `SnapshotStore::new`.
@@ -766,6 +812,8 @@ pub fn run_suites_with(
             specs: 0,
             snapshots: SnapshotSummary::default(),
             coverage: None,
+            focus_excluded: 0,
+            focus_used: false,
         });
     }
 
@@ -817,6 +865,7 @@ pub fn run_suites_with(
         };
 
         let mut suite_totals = Totals::default();
+        let mut suite_focus_used = false;
         let mut snapshot_err: Option<ToolError> = None;
         // Mismatches waiting for their owning test's verdict, keyed by
         // (spec file, full test name) — the spec file matters because two
@@ -869,7 +918,17 @@ pub fn run_suites_with(
                 }
                 let event: std::borrow::Cow<Event> = match event {
                     // Backend framing is dropped; the CLI supplies its own.
-                    Event::RunStart { .. } | Event::RunEnd { .. } => return,
+                    Event::RunStart { .. } => return,
+                    // Framing is dropped, but read first: a backend's own
+                    // `run_end` is the only place core says a focus modifier
+                    // was in effect — which is not implied by any exclusion,
+                    // since a wholly focused spec file excludes nothing.
+                    Event::RunEnd { focus_used, .. } => {
+                        if *focus_used {
+                            suite_focus_used = true;
+                        }
+                        return;
+                    }
                     // Snapshot pass/fail is the host's decision, and this is
                     // where it lands: a passed test whose snapshots
                     // mismatched is rewritten into a failure before any
@@ -922,6 +981,15 @@ pub fn run_suites_with(
                     _ => std::borrow::Cow::Borrowed(event),
                 };
                 let event = event.as_ref();
+                if matches!(
+                    event,
+                    Event::TestSkip {
+                        focus_excluded: true,
+                        ..
+                    }
+                ) {
+                    focus_excluded += 1;
+                }
                 suite_totals.record(event);
                 totals.record(event);
                 reporter.on_event(event);
@@ -962,7 +1030,9 @@ pub fn run_suites_with(
             passed: suite_totals.passed,
             failed: suite_totals.failed,
             skipped: suite_totals.skipped,
+            focus_used: suite_focus_used,
         });
+        focus_used = focus_used || suite_focus_used;
 
         if let Some(err) = snapshot_err {
             fatal = Some(err);
@@ -1025,6 +1095,8 @@ pub fn run_suites_with(
         specs: specs_seen,
         snapshots,
         coverage,
+        focus_excluded,
+        focus_used,
     })
 }
 
@@ -1165,6 +1237,8 @@ mod tests {
             specs,
             snapshots: SnapshotSummary::default(),
             coverage: None,
+            focus_excluded: 0,
+            focus_used: false,
         }
     }
 

@@ -212,7 +212,9 @@ impl<W: Write> Pretty<W> {
                 self.test_line(path, &line);
                 self.failure_block(path.len(), failure, origin.as_deref());
             }
-            Event::TestSkip { path, name, reason } => {
+            Event::TestSkip {
+                path, name, reason, ..
+            } => {
                 self.flush_pending();
                 self.sync_path(path);
                 let suffix = match reason {
@@ -554,6 +556,7 @@ mod tests {
             path: vec![],
             name: "later".into(),
             reason: None,
+            focus_excluded: false,
         }]);
         assert!(out.contains("○ later"));
         assert!(out.contains("Tests:       1 skipped, 0 passed, 1 total"));

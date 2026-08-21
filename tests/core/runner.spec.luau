@@ -6,7 +6,6 @@ local Lest = require('@lest')
 
 local describe, it, expect = Lest.describe, Lest.it, Lest.expect
 local beforeAll, beforeEach, afterEach, afterAll = Lest.beforeAll, Lest.beforeEach, Lest.afterEach, Lest.afterAll
-local xit = Lest.xit
 
 local function countKind (events: { { [string]: any } }, kind: string): number
 	local total = 0
@@ -88,8 +87,8 @@ describe('runner scope machinery', function ()
 				beforeAll(function ()
 					table.insert(log, 'ran')
 				end)
-				xit('a', function () end)
-				xit('b', function () end)
+				it.skip('a', function () end)
+				it.skip('b', function () end)
 			end)
 		end)
 
@@ -103,7 +102,7 @@ describe('runner scope machinery', function ()
 				beforeAll(function ()
 					table.insert(log, 'ran')
 				end)
-				xit('skipped', function () end)
+				it.skip('skipped', function () end)
 				it('runs', function ()
 					table.insert(log, 'test')
 				end)
@@ -175,7 +174,7 @@ describe('runner registration guards', function ()
 	it('counts skipped tests when checking for duplicates', function ()
 		expect(function ()
 			Lest.capture(function ()
-				xit('same name', function () end)
+				it.skip('same name', function () end)
 				it('same name', function () end)
 			end)
 		end).toThrow("duplicate test name: 'same name'")
@@ -239,10 +238,10 @@ describe('runner registration guards', function ()
 end)
 
 describe('runner skip reporting', function ()
-	it('carries an optional xit reason on the test_skip event', function ()
+	it('carries an optional it.skip reason on the test_skip event', function ()
 		local events = Lest.capture(function ()
-			xit('not yet', nil, 'blocked on backend support')
-			xit('no reason given', function () end)
+			it.skip('not yet', nil, 'blocked on backend support')
+			it.skip('no reason given', function () end)
 		end)
 
 		local skips = ofKind(events, 'test_skip')
