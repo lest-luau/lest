@@ -636,6 +636,73 @@ fn self_from_non_init_is_invalid() {
     );
 }
 
+// ── issue #33: init modules resolve relative requires from their parent ──────
+
+#[test]
+fn relative_from_init_resolves_beside_the_folder() {
+    // The Rojo layout from the issue: `pkg/init.luau` is the `pkg` module, so
+    // `./types` is pkg's sibling, not a file inside pkg.
+    let dir = tree(&["pkg/init.luau", "types.luau"]);
+    assert_resolves(dir.path(), "pkg/init.luau", "./types", "types.luau");
+    let dir = tree(&["pkg/init.lua", "types.luau"]);
+    assert_resolves(dir.path(), "pkg/init.lua", "./types", "types.luau");
+}
+
+#[test]
+fn parent_from_init_goes_above_the_folder() {
+    let dir = tree(&["shared.luau", "src/pkg/init.luau"]);
+    assert_resolves(dir.path(), "src/pkg/init.luau", "../shared", "shared.luau");
+}
+
+#[test]
+fn relative_from_init_prefers_sibling_over_inner_file() {
+    let dir = tree(&["pkg/init.luau", "pkg/types.luau", "types.luau"]);
+    assert_resolves(dir.path(), "pkg/init.luau", "./types", "types.luau");
+}
+
+#[test]
+fn relative_from_init_into_own_folder_suggests_self() {
+    let dir = tree(&["pkg/init.luau", "pkg/types.luau"]);
+    match resolve(&dir.path().join("pkg/init.luau"), "./types") {
+        Err(err @ ResolveError::InitRelative { .. }) => {
+            let ResolveError::InitRelative {
+                spec,
+                tried,
+                suggestion,
+            } = &err
+            else {
+                unreachable!()
+            };
+            assert_eq!(spec, "./types");
+            assert_eq!(suggestion, "@self/types");
+            assert_eq!(tried[0], normalize(&dir.path().join("types.luau")));
+            assert!(err.to_string().contains("require(\"@self/types\")"));
+        }
+        other => panic!("expected InitRelative, got {other:?}"),
+    }
+}
+
+#[test]
+fn relative_from_init_missing_everywhere_is_plain_not_found() {
+    let dir = tree(&["pkg/init.luau"]);
+    assert!(matches!(
+        resolve(&dir.path().join("pkg/init.luau"), "./types"),
+        Err(ResolveError::NotFound { .. })
+    ));
+}
+
+#[test]
+fn relative_from_init_server_script_stays_in_folder() {
+    // `init.server.luau` is a Script, not the folder's module — ordinary rules.
+    let dir = tree(&["pkg/init.server.luau", "pkg/inner.luau"]);
+    assert_resolves(
+        dir.path(),
+        "pkg/init.server.luau",
+        "./inner",
+        "pkg/inner.luau",
+    );
+}
+
 // ── audit fix #9: parenthesis-free require form ──────────────────────────────
 
 #[test]

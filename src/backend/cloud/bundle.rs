@@ -130,6 +130,9 @@ fn brief_reason(error: &ResolveError) -> String {
             format!("unreadable rojo project at {}", path.display())
         }
         ResolveError::NotFound { .. } => "no matching file on disk".to_string(),
+        ResolveError::InitRelative { suggestion, .. } => {
+            format!("no matching file beside the init module's folder (did you mean {suggestion}?)")
+        }
     }
 }
 

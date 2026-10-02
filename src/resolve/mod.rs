@@ -102,6 +102,14 @@ pub enum ResolveError {
         spec: String,
         tried: Vec<PathBuf>,
     },
+    /// A `./` require from an init module that found nothing beside the
+    /// module's folder but would have found `suggestion` (`@self/...`) inside
+    /// it — the pre-RFC reading of init-relative requires.
+    InitRelative {
+        spec: String,
+        tried: Vec<PathBuf>,
+        suggestion: String,
+    },
 }
 
 impl fmt::Display for ResolveError {
@@ -135,6 +143,21 @@ impl fmt::Display for ResolveError {
                     write!(f, "\n  {}", path.display())?;
                 }
                 Ok(())
+            }
+            ResolveError::InitRelative {
+                spec,
+                tried,
+                suggestion,
+            } => {
+                write!(f, "cannot resolve require(\"{spec}\"): no file at")?;
+                for path in tried {
+                    write!(f, "\n  {}", path.display())?;
+                }
+                write!(
+                    f,
+                    "\nan init module stands for its folder, so `./` resolves beside the folder, \
+                     not inside it — use require(\"{suggestion}\") to reach a file inside"
+                )
             }
         }
     }
@@ -225,9 +248,33 @@ impl Resolver {
             });
         }
 
-        let base = requiring_file.parent().unwrap_or_else(|| Path::new("."));
-        let target = normalize(&base.join(spec));
-        resolve_target(spec, &target)
+        // An init module stands for its folder (Luau's "abstract module paths
+        // and init.luau" RFC, matching Rojo/Roblox), so its relative requires
+        // resolve from the folder's parent; `@self/` reaches inside.
+        let dir = requiring_file.parent().unwrap_or_else(|| Path::new("."));
+        if !is_init_module(requiring_file) {
+            return resolve_target(spec, &normalize(&dir.join(spec)));
+        }
+        let base = dir.parent().unwrap_or(dir);
+        match resolve_target(spec, &normalize(&base.join(spec))) {
+            // Pre-RFC Luau resolved `./` from the init module's own folder.
+            // When that old reading would have found a file, say how to spell
+            // it now instead of leaving a bare candidate list.
+            Err(ResolveError::NotFound { spec, tried }) => {
+                let inner = spec
+                    .strip_prefix("./")
+                    .filter(|rest| resolve_target(&spec, &normalize(&dir.join(rest))).is_ok());
+                match inner {
+                    Some(rest) => Err(ResolveError::InitRelative {
+                        suggestion: format!("@self/{rest}"),
+                        spec,
+                        tried,
+                    }),
+                    None => Err(ResolveError::NotFound { spec, tried }),
+                }
+            }
+            other => other,
+        }
     }
 
     /// Config aliases: walks up from the requiring file's directory; the
@@ -316,12 +363,7 @@ impl Resolver {
 /// modules a string require can reach, so they are deliberately not recognized
 /// here. See [`INIT_SCRIPT_NAMES`], which is the rojo-side list.
 fn resolve_self(requiring_file: &Path, spec: &str) -> Result<Resolved, ResolveError> {
-    let is_init = requiring_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|stem| stem.eq_ignore_ascii_case("init"))
-        .unwrap_or(false);
-    if !is_init {
+    if !is_init_module(requiring_file) {
         return Err(ResolveError::InvalidSelf {
             spec: spec.to_string(),
         });
@@ -335,6 +377,15 @@ fn resolve_self(requiring_file: &Path, spec: &str) -> Result<Resolved, ResolveEr
     let base = requiring_file.parent().unwrap_or_else(|| Path::new("."));
     let target = normalize(&base.join(rest));
     resolve_target(spec, &target)
+}
+
+/// Whether `path` is an `init.luau`/`init.lua` module, which stands for its
+/// directory. See [`resolve_self`] for why Rojo's `init.server`/`init.client`
+/// forms are excluded.
+fn is_init_module(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("init"))
 }
 
 /// Reads and parses one `.luaurc`'s alias table, lowercasing alias names for
